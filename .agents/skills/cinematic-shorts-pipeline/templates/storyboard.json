@@ -41,6 +41,45 @@
         "narrative_light_source": "Explorer's headlamp",
         "visible_information": ["Explorer silhouette", "Cave fork", "Trail direction"],
         "transition_reason": "Cut to the fork when the headlamp reaches it."
+      },
+      "animation": {
+        "rig": {
+          "status": "unselected",
+          "profile": "Adult biped with independent root, gaze, foot, and hand controls.",
+          "required_controls": ["root", "gaze", "foot_ik", "hand_ik", "prop_contact"]
+        },
+        "beats": [
+          {
+            "start_offset": 0,
+            "end_offset": 40,
+            "action": "Walk toward the fork and decelerate.",
+            "pose_in": "Cautious upright walk.",
+            "pose_out": "Upper body settles over the leading foot.",
+            "anticipation": "Short weight shift before the final step.",
+            "weight_intent": "Transfer weight into the planted leading foot.",
+            "root_motion": {"mode": "travel", "screen_direction": "away-from-camera", "intent": "Advance along the entry path toward the fork."},
+            "support": {"left_foot": "support", "right_foot": "swing", "weight_transfer": "Left foot supports as right foot clears the ground."},
+            "gaze": {"target": "Cave fork", "direction_in": "away-from-camera", "direction_out": "screen-right"},
+            "hands": []
+          },
+          {
+            "start_offset": 40,
+            "end_offset": 60,
+            "action": "Stop and hold at the fork.",
+            "pose_in": "Upper body settling from the final step.",
+            "pose_out": "Balanced standing pose, ready to inspect the route.",
+            "anticipation": "none",
+            "weight_intent": "Distribute weight over both planted feet.",
+            "root_motion": {"mode": "stationary", "screen_direction": "static", "intent": "Hold position; no root displacement."},
+            "support": {"left_foot": "planted", "right_foot": "planted", "weight_transfer": "Settle evenly without sliding either foot."},
+            "gaze": {"target": "Fork in the trail", "direction_in": "screen-right", "direction_out": "screen-right"},
+            "hands": []
+          }
+        ],
+        "continuity": {
+          "incoming": "Opening shot; start already oriented toward the cave interior.",
+          "outgoing": "End balanced and looking screen-right for shot-02."
+        }
       }
     },
     {

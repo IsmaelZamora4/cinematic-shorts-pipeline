@@ -20,11 +20,20 @@
 
 **Verificación de v0.3 (2026-11-04):** 29/29 pruebas aprobadas; `validate-skill.py` aprobó; los tres storyboards de ejemplo y `templates/storyboard.json` pasaron `validate-storyboard.py`.
 
-## Siguiente bloque — animación 3D
+## v0.4 — planificación de animación 3D
 
-1. Especificar compatibilidad de rigs, jerarquías/huesos y clips para recursos exactos.
-2. Planear apoyos, peso, desplazamiento raíz, mirada, manos/props, anticipación y transiciones de actuación.
-3. Revisar continuidad de actuación en secuencia reproducida; no inferirla de stills. No iniciar adaptadores de Blender/Remotion hasta definir ese contrato.
+- Contrato `animation` opcional y compatible con `schema_version: 1`; storyboards v0.3 permanecen válidos.
+- Validador comprueba estado/requisitos de rig, beats contiguos por plano, poses, peso/apoyos, root motion, mirada, manos/props y continuidad declarada.
+- Guía y rúbrica separan planificación declarada de evidencia de rig, still y secuencia reproducida.
+- Ejemplo de cueva documenta beats por plano; sin implementación de personaje ni producción audiovisual.
+
+**Verificación de v0.4 (2026-11-04):** 33/33 pruebas aprobadas; `validate-skill.py` y los tres storyboards de ejemplo más `templates/storyboard.json` pasan sus validadores. La aprobación audiovisual sigue pendiente: no se generó ni reprodujo una secuencia.
+
+## Siguiente bloque — implementación de animación
+
+1. Resolver asset/rig exacto, licencia, jerarquía, mapping y controles con evidencia.
+2. Solo con autorización, implementar y revisar root motion, contactos, mirada/manos, props y empalmes en una secuencia controlada.
+3. Mantener adaptadores Blender/Remotion, renders y animación fuera de este bloque de planificación.
 
 ## Pendiente de implementación
 

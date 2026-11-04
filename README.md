@@ -22,6 +22,8 @@ python -B -m unittest discover -s .agents/skills/cinematic-shorts-pipeline/tests
 
 Storyboards `schema_version: 1` pueden añadir por plano un bloque opcional `cinematography` con foco, tamaño/ángulo, posición focal relativa, continuidad, cámara, fuente narrativa, información visible y corte. Sus coordenadas son proporciones 2D del cuadro, no posiciones 3D. La validación estructural no aprueba calidad cinematográfica.
 
+También pueden añadir un bloque opcional `animation` para rig requerido/status, beats relativos al plano, poses, peso/apoyos, root motion, mirada, manos/props y continuidad de entrada/salida. Valida estructura y tiempo, no rigs reales ni actuación; estos requieren evidencia de recurso y secuencia reproducida.
+
 Guarda paquetes nuevos en `deliverables/<slug>/` (brief/plan y `storyboard.json`). No muevas ni sobrescribas entregables existentes al añadir otro paquete.
 
 El benchmark es un protocolo, no mediciones. Los ejemplos son paquetes ficticios de planificación. Ningún video, imagen, audio, voz, render ni modelo 3D forma parte del proyecto.

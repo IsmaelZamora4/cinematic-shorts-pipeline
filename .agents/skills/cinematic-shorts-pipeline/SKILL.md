@@ -14,7 +14,7 @@ Crea un paquete de producción revisable a partir de una idea o guion. Esta skil
 | Encargo | Idea, guion o petición | Brief con audiencia, formato, duración, idioma, tono, restricciones y entregables; incógnitas señaladas | Requisitos esenciales completos; hechos y restricciones entendidos |
 | Historia | Brief aprobado | Logline, objetivo, obstáculo, riesgo, beats, giro y cierre | Causa/efecto legibles; hechos separados de ficción; sin decisión narrativa bloqueante |
 | Estética y recursos | Historia aprobada | Hoja de estilo, criterios de personajes/entornos y lista de recursos candidatos | Estilo coherente; cada recurso usado tiene fuente/licencia/formato/rig verificados o queda marcado pendiente y fuera del plan aprobado |
-| Storyboard | Historia y dirección aprobadas | JSON por plano; bloque opcional `cinematography` describe foco, tamaño/ángulo, punto focal relativo, continuidad, cámara, luz narrativa, información visible y corte | Validador pasa; tiempo cubre total; revisión de intención identifica primer foco, acción, información, fuente y conexión al corte. Still 9:16 y secuencia tienen puertas separadas |
+| Storyboard | Historia y dirección aprobadas | JSON por plano; bloques opcionales `cinematography` y `animation` describen cámara/luz y actuación por beats | Validador pasa; intención de foco/corte y beats/continuidad revisada. Still 9:16 y secuencia tienen puertas separadas; rig sin verificar no queda aprobado para producción |
 | Plan técnico | Storyboard aprobado | Motor y versiones, recursos/licencias, animación, voz/subtítulos, perfil y coste/limitaciones previstos | Ruta local viable; dependencias y medidas de recursos explícitas; sin incertidumbre crítica oculta |
 | Control de calidad | Paquete anterior completo | Rúbrica con evidencia, resultados automáticos, revisión visual y evaluación humana separadas | Todos los fallos corregidos o aceptados expresamente; bloqueos listados; no afirmar checks sin ejecutarlos |
 
@@ -28,7 +28,7 @@ Guarda paquetes nuevos en `deliverables/<slug>/` con un brief/plan y `storyboard
 
 ## Estado de capacidad
 
-Implementado: guías de planificación, validación de contrato cinematográfico opcional, rúbrica cualitativa y ejemplos de paquete. La validación de storyboard solo cubre estructura y rangos declarados; no valida composición ni calidad visual. Los resultados de benchmarking, disponibilidad de assets, licencia y compatibilidad de rigs se verifican por tarea. Esta skill no tiene generadores de medios, motor de render, alineador TTS/subtítulos, evaluación temporal automática ni escáner legal.
+Implementado: guías de planificación, contratos opcionales de cinematografía y animación, rúbrica cualitativa y ejemplos de paquete. La validación de storyboard comprueba estructura y tiempos declarados; no valida cámara, actuación, existencia/compatibilidad de rigs ni calidad visual. Los resultados de benchmarking, disponibilidad de assets, licencia y compatibilidad se verifican por tarea. Esta skill no tiene generadores de medios, motor de render, alineador TTS/subtítulos, evaluación temporal automática ni escáner legal.
 
 ## Contexto local
 

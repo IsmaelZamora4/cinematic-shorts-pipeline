@@ -42,6 +42,45 @@
         "narrative_light_source": "Linterna frontal de la exploradora",
         "visible_information": ["Exploradora completa", "Línea de agua sobre el sendero", "Ruta hacia el interior"],
         "transition_reason": "Cortar cuando el haz se desplaza hacia la cuerda, preservando el eje hacia el interior."
+      },
+      "animation": {
+        "rig": {
+          "status": "unselected",
+          "profile": "Exploradora adulta bípeda; controles requeridos para raíz, mirada, pies y manos.",
+          "required_controls": ["root", "gaze", "foot_ik", "hand_ik", "prop_contact"]
+        },
+        "beats": [
+          {
+            "start_offset": 0,
+            "end_offset": 42,
+            "action": "Avanzar por el sendero y frenar cuando el haz llega a la línea de agua.",
+            "pose_in": "Marcha cautelosa con torso estable.",
+            "pose_out": "Paso final asentado, torso empieza a detenerse.",
+            "anticipation": "Transferir el peso antes del paso que frena el avance.",
+            "weight_intent": "Cargar el pie de apoyo y dejar que el torso desacelere sobre él.",
+            "root_motion": {"mode": "travel", "screen_direction": "away-from-camera", "intent": "Avanzar hacia el interior por la ruta visible."},
+            "support": {"left_foot": "support", "right_foot": "swing", "weight_transfer": "El pie izquierdo sostiene mientras el derecho completa el paso y se prepara para plantar."},
+            "gaze": {"target": "Línea de agua bajo la linterna", "direction_in": "away-from-camera", "direction_out": "down"},
+            "hands": []
+          },
+          {
+            "start_offset": 42,
+            "end_offset": 60,
+            "action": "Asentar la postura y orientar la mirada hacia la cuerda para el plano siguiente.",
+            "pose_in": "Torso terminando la desaceleración.",
+            "pose_out": "Equilibrio estable, cabeza y mirada hacia pantalla derecha.",
+            "anticipation": "none",
+            "weight_intent": "Distribuir el peso entre ambos pies sin deslizar la base.",
+            "root_motion": {"mode": "stationary", "screen_direction": "static", "intent": "Mantener la posición mientras cambia la mirada."},
+            "support": {"left_foot": "planted", "right_foot": "planted", "weight_transfer": "Estabilizar sobre ambos pies antes del giro de cabeza."},
+            "gaze": {"target": "Cuerda en la pared", "direction_in": "down", "direction_out": "screen-right"},
+            "hands": []
+          }
+        ],
+        "continuity": {
+          "incoming": "Plano inicial; comienza orientada hacia el interior, sin paso previo en cuadro.",
+          "outgoing": "Termina estable y mirando a pantalla derecha; el siguiente plano encuentra la cuerda en esa línea de mirada."
+        }
       }
     },
     {
@@ -71,6 +110,46 @@
         "narrative_light_source": "Linterna frontal orientada por la mirada de la exploradora",
         "visible_information": ["Cuerda cortada y fibras", "Mano detenida antes de tocarla", "Superficie húmeda detrás"],
         "transition_reason": "Cortar después de leer el corte a la reacción de la exploradora; mantener la mirada hacia pantalla derecha."
+      },
+      "animation": {
+        "rig": {
+          "status": "unselected",
+          "profile": "Exploradora adulta bípeda con raíz estable, objetivo de mirada, pies y control de mano para aproximación a prop.",
+          "required_controls": ["root", "gaze", "foot_ik", "hand_ik", "prop_contact"]
+        },
+        "beats": [
+          {
+            "start_offset": 0,
+            "end_offset": 26,
+            "action": "Detenerse y dirigir la atención al extremo cortado.",
+            "pose_in": "Postura equilibrada desde el plano anterior.",
+            "pose_out": "Torso orientado al hallazgo, brazo aún recogido.",
+            "anticipation": "Los ojos llegan al corte antes de que gire la cabeza.",
+            "weight_intent": "Mantener el peso sobre la base; no avanzar sobre la pista.",
+            "root_motion": {"mode": "stationary", "screen_direction": "static", "intent": "Fijar la raíz para que la cuerda y la mirada sean la acción."},
+            "support": {"left_foot": "planted", "right_foot": "planted", "weight_transfer": "Pequeño asentamiento, ambos pies continúan en contacto."},
+            "gaze": {"target": "Fibras del extremo cortado", "direction_in": "screen-right", "direction_out": "screen-right"},
+            "hands": []
+          },
+          {
+            "start_offset": 26,
+            "end_offset": 60,
+            "action": "Alcanzar la cuerda y detener la mano antes del contacto.",
+            "pose_in": "Cabeza fijada en las fibras; mano cerca del torso.",
+            "pose_out": "Mano suspendida a poca distancia de la cuerda; postura equilibrada.",
+            "anticipation": "Iniciar el alcance después de fijar la mirada.",
+            "weight_intent": "Mantener pelvis sobre los pies; el alcance no arrastra la raíz.",
+            "root_motion": {"mode": "stationary", "screen_direction": "static", "intent": "No desplazar el cuerpo durante la aproximación de mano."},
+            "support": {"left_foot": "planted", "right_foot": "planted", "weight_transfer": "Conservar apoyo bilateral sin inclinar el torso fuera de base."},
+            "gaze": {"target": "Punto de corte de la cuerda", "direction_in": "screen-right", "direction_out": "screen-right"},
+            "hands": [{"side": "left", "intent": "Alcanzar y frenar sin tocar.", "target": "Extremo de cuerda", "contact_state": "approach"}],
+            "prop_interaction": {"prop": "Cuerda cortada", "hand": "left", "action": "Aproximar la mano y detenerla antes de tocar.", "contact_state": "approach", "prop_response": "La cuerda no se mueve; no hay contacto todavía."}
+          }
+        ],
+        "continuity": {
+          "incoming": "Coincide con la mirada hacia pantalla derecha del plano de entrada; pies estables.",
+          "outgoing": "Conservar mano cerca de la cuerda; levantar la cabeza hacia la repisa en el plano siguiente, sin cambiar de eje."
+        }
       }
     },
     {
@@ -100,6 +179,58 @@
         "narrative_light_source": "Linterna frontal que sigue el giro hacia la repisa",
         "visible_information": ["Giro de decisión", "Repisa como ruta posible", "Agua alcanzando la marca del sendero"],
         "transition_reason": "Plano final; sostener un instante la elección y terminar antes de revelar el destino."
+      },
+      "animation": {
+        "rig": {
+          "status": "unselected",
+          "profile": "Exploradora adulta bípeda con control de raíz, mirada, apoyos y manos para soltar/recolocar la cuerda.",
+          "required_controls": ["root", "gaze", "foot_ik", "hand_ik", "prop_contact"]
+        },
+        "beats": [
+          {
+            "start_offset": 0,
+            "end_offset": 20,
+            "action": "Retirar la atención de la cuerda y girar hacia la repisa.",
+            "pose_in": "Mano detenida cerca de la cuerda, cabeza dirigida a pantalla derecha.",
+            "pose_out": "Torso orientado a la repisa, mano separada del prop.",
+            "anticipation": "Mirada abandona la cuerda antes del giro de torso.",
+            "weight_intent": "Cargar ligeramente el pie interior para girar sin perder equilibrio.",
+            "root_motion": {"mode": "in-place-turn", "screen_direction": "static", "intent": "Girar en la base sin traslación hasta confirmar la ruta."},
+            "support": {"left_foot": "planted", "right_foot": "support", "weight_transfer": "Transferir apoyo al pie derecho mientras el pie izquierdo libera el giro."},
+            "gaze": {"target": "Repisa estrecha", "direction_in": "screen-right", "direction_out": "screen-right"},
+            "hands": [{"side": "left", "intent": "Retirar la mano antes del contacto y llevarla junto al cuerpo.", "target": "Cuerda cortada", "contact_state": "none"}]
+          },
+          {
+            "start_offset": 20,
+            "end_offset": 45,
+            "action": "Dar un paso hacia la repisa cuando el agua alcanza la marca.",
+            "pose_in": "Giro completado, mirada en la ruta.",
+            "pose_out": "Paso hacia la ruta; cuerpo inclinado lo justo para iniciar avance.",
+            "anticipation": "Breve carga en el pie de apoyo antes de avanzar.",
+            "weight_intent": "Transferir el peso hacia el pie que inicia el desplazamiento.",
+            "root_motion": {"mode": "travel", "screen_direction": "away-from-camera", "intent": "Avanzar hacia la repisa sin salir del cuadro vertical."},
+            "support": {"left_foot": "support", "right_foot": "swing", "weight_transfer": "El pie izquierdo sostiene; el derecho inicia el paso hacia la ruta."},
+            "gaze": {"target": "Borde de la repisa", "direction_in": "screen-right", "direction_out": "screen-right"},
+            "hands": []
+          },
+          {
+            "start_offset": 45,
+            "end_offset": 60,
+            "action": "Asentar la decisión y sostener la mirada en la ruta fuera de alcance.",
+            "pose_in": "Paso terminando hacia la repisa.",
+            "pose_out": "Postura asentada, mirada sostenida hacia el interior.",
+            "anticipation": "none",
+            "weight_intent": "Dejar que la masa termine de asentarse sobre la nueva base.",
+            "root_motion": {"mode": "stationary", "screen_direction": "static", "intent": "Detener avance y mantener el cierre sin revelar destino."},
+            "support": {"left_foot": "planted", "right_foot": "planted", "weight_transfer": "Completar transferencia y estabilizar ambos pies antes del corte final."},
+            "gaze": {"target": "Repisa y túnel", "direction_in": "screen-right", "direction_out": "screen-right"},
+            "hands": []
+          }
+        ],
+        "continuity": {
+          "incoming": "Recibe mirada y mano separándose de la cuerda; mantiene el eje hacia el interior.",
+          "outgoing": "Plano final; termina con peso asentado y mirada sostenida, sin toma siguiente."
+        }
       }
     }
   ]
