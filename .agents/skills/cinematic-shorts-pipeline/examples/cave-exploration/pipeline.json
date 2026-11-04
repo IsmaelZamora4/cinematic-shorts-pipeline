@@ -1,0 +1,44 @@
+{
+  "pipeline_version": 1,
+  "project": {
+    "id": "cave-exploration-v04",
+    "storyboard": "storyboard.json",
+    "resources": []
+  },
+  "profile": {
+    "width": 540,
+    "height": 960,
+    "fps": 30,
+    "format": "mp4",
+    "limits": {
+      "cpu_threads": 2,
+      "memory_mb": 8192,
+      "vram_mb": 3072,
+      "max_parallel_stages": 1
+    }
+  },
+  "workspace": {
+    "intermediate_dir": ".pipeline/work",
+    "artifact_dir": ".pipeline/artifacts",
+    "manifest_dir": ".pipeline/runs"
+  },
+  "retry_policy": {
+    "max_attempts": 2,
+    "retryable_errors": ["transient", "timeout", "resource-pressure"],
+    "resume_policy": "fingerprint"
+  },
+  "tools": [
+    {"id": "blender", "executable": "blender", "version_requirement": ">=4.0,<6.0 (compatibility pending verification)", "availability": "not_checked", "adapter_status": "pending"},
+    {"id": "kokoro", "executable": "kokoro", "version_requirement": "verify model and runtime version", "availability": "not_checked", "adapter_status": "pending"},
+    {"id": "remotion", "executable": "remotion", "version_requirement": "verify project package lock", "availability": "not_checked", "adapter_status": "pending"},
+    {"id": "ffmpeg", "executable": "ffmpeg", "version_requirement": "verify local build version", "availability": "not_checked", "adapter_status": "pending"}
+  ],
+  "stages": [
+    {"id": "01-validate-project", "adapter": "builtin-validation", "adapter_status": "implemented", "depends_on": [], "inputs": ["storyboard"], "outputs": [{"id": "validated-plan", "path": ".pipeline/work/validated-plan.json"}], "tools": []},
+    {"id": "02-blender-scenes", "adapter": "blender-scenes", "adapter_status": "pending", "depends_on": ["01-validate-project"], "inputs": ["storyboard", "validated-plan"], "outputs": [{"id": "scene-package", "path": ".pipeline/work/scenes.json"}], "tools": ["blender"]},
+    {"id": "03-kokoro-narration", "adapter": "kokoro-narration", "adapter_status": "pending", "depends_on": ["01-validate-project"], "inputs": ["storyboard", "validated-plan"], "outputs": [{"id": "narration", "path": ".pipeline/work/narration.wav"}], "tools": ["kokoro"]},
+    {"id": "04-remotion-compose", "adapter": "remotion-compose", "adapter_status": "pending", "depends_on": ["02-blender-scenes", "03-kokoro-narration"], "inputs": ["scene-package", "narration"], "outputs": [{"id": "composite", "path": ".pipeline/work/composite.mp4"}], "tools": ["remotion"]},
+    {"id": "05-ffmpeg-finalize", "adapter": "ffmpeg-finalize", "adapter_status": "pending", "depends_on": ["04-remotion-compose"], "inputs": ["composite"], "outputs": [{"id": "final-video", "path": ".pipeline/artifacts/final.mp4"}], "tools": ["ffmpeg"]},
+    {"id": "06-quality-control", "adapter": "quality-control", "adapter_status": "pending", "depends_on": ["05-ffmpeg-finalize"], "inputs": ["final-video"], "outputs": [{"id": "quality-report", "path": ".pipeline/artifacts/quality-report.json"}], "tools": []}
+  ]
+}

@@ -22,13 +22,17 @@ No saltes una puerta fallida. Un plan, vista previa, fotograma, narración o ren
 
 Para cada storyboard ejecuta `python scripts/validate-storyboard.py ruta/al/storyboard.json`. `validate-skill.py` también valida estructura y cronología de todos los `examples/**/storyboard.json` y `templates/storyboard.json`, reutilizando el validador de storyboard. Para revisar la skill completa, ejecuta `python scripts/validate-skill.py .` y `python -m unittest discover -s tests -v`.
 
+Los proyectos pueden versionar un `pipeline.json` con `pipeline_version: 1`, independiente del storyboard. Valida con `python scripts/pipeline.py validate ruta/al/pipeline.json`; inspecciona el DAG sin ejecutar ni escribir con `plan` o `dry-run`; valida un manifiesto existente con `validate-manifest pipeline.json run-manifest.json`. Consulta `references/pipeline-orchestration.md` antes de editar ese contrato.
+
 Los captions usan intervalos `[start_ms, end_ms)`: solapes rechazados por defecto. Un solape intencional requiere `overlap_exception` no vacío en el caption que empieza después; documenta su motivo.
 
 Guarda paquetes nuevos en `deliverables/<slug>/` con un brief/plan y `storyboard.json`. Usa un slug estable y conserva los entregables existentes; no muevas ni sobrescribas paquetes anteriores al crear uno nuevo.
 
 ## Estado de capacidad
 
-Implementado: guías de planificación, contratos opcionales de cinematografía y animación, rúbrica cualitativa y ejemplos de paquete. La validación de storyboard comprueba estructura y tiempos declarados; no valida cámara, actuación, existencia/compatibilidad de rigs ni calidad visual. Los resultados de benchmarking, disponibilidad de assets, licencia y compatibilidad se verifican por tarea. Esta skill no tiene generadores de medios, motor de render, alineador TTS/subtítulos, evaluación temporal automática ni escáner legal.
+Implementado: guías de planificación, contratos opcionales de cinematografía y animación, rúbrica cualitativa, planificador DAG local y validación de contratos de pipeline/manifiesto. `pipeline.py plan` y `dry-run` muestran el grafo sin ejecutar etapas ni crear archivos. La validación de storyboard comprueba estructura y tiempos declarados; no valida cámara, actuación, existencia/compatibilidad de rigs ni calidad visual. El validador de manifiestos comprueba estados, huellas y salidas, pero no crea ni reanuda ejecuciones.
+
+Las etapas audiovisuales y sus adaptadores siguen pendientes. No hay generación de medios, motor de render, adaptador de TTS, composición, QA audiovisual temporal ni escáner legal. Los resultados de benchmarking, disponibilidad de assets, licencia, herramientas y compatibilidad se verifican por tarea.
 
 ## Contexto local
 
@@ -48,6 +52,7 @@ Usa la [rúbrica cinematográfica](references/cinematic-quality-rubric.md) para 
 - TTS, audio y subtítulos: [references/voice-and-captions.md](references/voice-and-captions.md)
 - Puertas de revisión: [references/quality-control.md](references/quality-control.md)
 - Rúbrica cinematográfica: [references/cinematic-quality-rubric.md](references/cinematic-quality-rubric.md)
+- Arquitectura y uso del pipeline: [references/pipeline-orchestration.md](references/pipeline-orchestration.md)
 - Auditoría de fuentes: [docs/sources.md](docs/sources.md)
 - Skills candidatas: [docs/skill-candidates.md](docs/skill-candidates.md)
 - Hallazgos locales: [docs/lessons-learned.md](docs/lessons-learned.md)

@@ -26,4 +26,4 @@ Registra cada comprobación como **aprobada**, **fallida**, **sin revisar** o **
 - Mide tiempo de render y memoria en la máquina destino; limita concurrencia y calidad inicial cuando sea necesario.
 - Tras el render solicitado, inspecciona fotogramas representativos y reproduce el archivo; valida lectura, dimensiones, FPS, duración, audio y subtítulos. Informa comandos y resultados observados.
 
-Los scripts incluidos validan el empaquetado de la skill y los datos del storyboard. No renderizan, inspeccionan calidad audiovisual, verifican licencias ni juzgan la narrativa.
+Los scripts incluidos validan el empaquetado de la skill, los datos del storyboard, el DAG del pipeline y manifiestos existentes. No ejecutan etapas de producción, renderizan, inspeccionan calidad audiovisual, verifican licencias ni juzgan la narrativa.

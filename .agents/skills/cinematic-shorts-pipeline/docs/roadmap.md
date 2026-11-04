@@ -29,11 +29,22 @@
 
 **Verificación de v0.4 (2026-11-04):** 33/33 pruebas aprobadas; `validate-skill.py` y los tres storyboards de ejemplo más `templates/storyboard.json` pasan sus validadores. La aprobación audiovisual sigue pendiente: no se generó ni reprodujo una secuencia.
 
-## Siguiente bloque — implementación de animación
+## v0.5 — arquitectura y orquestación local
 
-1. Resolver asset/rig exacto, licencia, jerarquía, mapping y controles con evidencia.
-2. Solo con autorización, implementar y revisar root motion, contactos, mirada/manos, props y empalmes en una secuencia controlada.
-3. Mantener adaptadores Blender/Remotion, renders y animación fuera de este bloque de planificación.
+- Contrato independiente `pipeline_version: 1`, plantilla y ejemplo de cueva; rutas relativas confinadas a la raíz del proyecto.
+- DAG de seis etapas, detección de dependencias/ciclos, olas deterministas y candidatos a paralelismo; concurrencia objetivo conservadora.
+- CLI estándar de Python `validate`, `plan`, `dry-run` y `validate-manifest`; no invoca motores ni escribe artefactos.
+- Contrato/validador de manifiesto con estados, intentos, dependencias, fingerprints y hash de salidas; reanudación selectiva queda diseñada, no ejecutada.
+- Workflow de CI mínimo para pruebas y validadores; adaptadores audiovisuales siguen pendientes.
+
+**Verificación de v0.5 (2026-11-04):** 55 pruebas ejecutadas; 54 aprobadas y 1 omitida porque el entorno Windows no permitió crear symlinks. `validate-skill.py`, los cuatro storyboards, las dos configuraciones del pipeline y `dry-run` pasaron. `validate-manifest` pasó mediante pruebas unitarias. El workflow de GitHub Actions está configurado, pero no se ejecutó en GitHub durante esta preparación.
+
+## Siguiente bloque — adaptadores de producción (futuro)
+
+1. Verificar versiones locales, procedencia de recursos, licencias y requisitos de cada adaptador antes de declarar disponibilidad.
+2. Implementar invocación controlada sin shell, límites de tiempo/recursos, registro de versiones y salidas hash verificables.
+3. Resolver rig/asset exacto y validar poses, apoyos, root motion, mirada, manos/props y continuidad en una secuencia autorizada.
+4. Implementar persistencia y reanudación segura solo después de probar invalidación de entradas, configuración y dependencias.
 
 ## Pendiente de implementación
 

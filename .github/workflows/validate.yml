@@ -1,0 +1,31 @@
+name: Validate planning pipeline
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run unit tests
+        run: python -B -m unittest discover -s .agents/skills/cinematic-shorts-pipeline/tests -v
+      - name: Validate skill package and examples
+        run: python -B .agents/skills/cinematic-shorts-pipeline/scripts/validate-skill.py .agents/skills/cinematic-shorts-pipeline
+      - name: Validate pipeline template and example
+        run: |
+          python -B .agents/skills/cinematic-shorts-pipeline/scripts/pipeline.py validate .agents/skills/cinematic-shorts-pipeline/templates/pipeline.json
+          python -B .agents/skills/cinematic-shorts-pipeline/scripts/pipeline.py validate .agents/skills/cinematic-shorts-pipeline/examples/cave-exploration/pipeline.json
+      - name: Validate storyboard examples
+        run: |
+          python -B .agents/skills/cinematic-shorts-pipeline/scripts/validate-storyboard.py .agents/skills/cinematic-shorts-pipeline/examples/cave-exploration/storyboard.json
+          python -B .agents/skills/cinematic-shorts-pipeline/scripts/validate-storyboard.py .agents/skills/cinematic-shorts-pipeline/examples/forest-storm/storyboard.json
+          python -B .agents/skills/cinematic-shorts-pipeline/scripts/validate-storyboard.py .agents/skills/cinematic-shorts-pipeline/examples/abandoned-research-station/storyboard.json
