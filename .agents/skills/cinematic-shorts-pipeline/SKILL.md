@@ -53,6 +53,7 @@ Usa la [rúbrica cinematográfica](references/cinematic-quality-rubric.md) para 
 - Puertas de revisión: [references/quality-control.md](references/quality-control.md)
 - Rúbrica cinematográfica: [references/cinematic-quality-rubric.md](references/cinematic-quality-rubric.md)
 - Arquitectura y uso del pipeline: [references/pipeline-orchestration.md](references/pipeline-orchestration.md)
+- Seguridad y validación reproducible del pipeline: [references/pipeline-security.md](references/pipeline-security.md)
 - Auditoría de fuentes: [docs/sources.md](docs/sources.md)
 - Skills candidatas: [docs/skill-candidates.md](docs/skill-candidates.md)
 - Hallazgos locales: [docs/lessons-learned.md](docs/lessons-learned.md)

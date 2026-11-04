@@ -22,6 +22,17 @@ Auditoría de solo lectura realizada el 2026-11-04. No se copió contenido de re
 
 Las páginas respondieron HTTP 200 durante la investigación. Las skills locales y el manifiesto del proyecto aportan contexto de versión. No se creó una composición de producción ni se verificó cada detalle de API; al implementar, consulta la documentación de la versión activa.
 
+## Fuentes oficiales de GitHub Actions y runners
+
+Consulta realizada el 2026-11-04. La API oficial reportó `actions/checkout` v7.0.1 y `actions/setup-python` v7.1.0 como releases más recientes consultadas. Los manifiestos en sus commits etiquetados declaran `runs.using: node24`:
+
+- [Release checkout v7.0.1](https://github.com/actions/checkout/releases/tag/v7.0.1) · [manifiesto inmutable](https://github.com/actions/checkout/blob/3d3c42e5aac5ba805825da76410c181273ba90b1/action.yml)
+- [Release setup-python v7.1.0](https://github.com/actions/setup-python/releases/tag/v7.1.0) · [manifiesto inmutable](https://github.com/actions/setup-python/blob/6d4fd22b20465ccc0f7354476588e8df7c9ca0e0/action.yml)
+- [Guía oficial de endurecimiento de GitHub Actions](https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions): recomienda fijar acciones a un SHA completo cuando se busca evitar que una etiqueta mutable cambie el código ejecutado.
+- [Runners hospedados por GitHub](https://docs.github.com/en/actions/reference/runners/github-hosted-runners) y [imágenes oficiales de runner](https://github.com/actions/runner-images): se listan `ubuntu-24.04` y `ubuntu-26.04`. La matriz de este proyecto los solicita; su compatibilidad integral solo queda demostrada cuando ambos jobs remotos finalicen correctamente.
+
+Las versiones y runtimes se verificaron contra releases y manifiestos oficiales, y los SHAs corresponden a las etiquetas indicadas. No se ejecutó una nueva Actions run desde esta rama local.
+
 ## Nota de licencia
 
 Este proyecto aplica MIT a documentación original y código validador propios. No relicencia repositorios citados, modelos, fuentes, música, imágenes, voces ni conjuntos de datos. VoiceStudio figura con AGPL-3.0 en los metadatos de GitHub; busca revisión adecuada antes de incorporar o distribuir código modificado. Comprueba permisos por recurso y paquete exactos.
