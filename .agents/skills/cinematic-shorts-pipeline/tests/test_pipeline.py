@@ -1,13 +1,16 @@
 import contextlib
+import builtins
 import importlib.util
 import io
 import json
 import os
 import shutil
+import socket
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+import urllib.request
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -118,6 +121,74 @@ class PipelineValidationTests(unittest.TestCase):
         self.assertTrue(any("project.storyboard" in error and "parent path segments" in error for error in errors))
         self.assertTrue(any("intermediate_dir" in error for error in errors))
         self.assertTrue(any("outputs" in error for error in errors))
+
+    def test_rejects_posix_unc_and_malformed_relative_paths(self):
+        for path in ("/etc/passwd", "//server/share/storyboard.json", "share//storyboard.json", "share/./storyboard.json"):
+            with self.subTest(path=path):
+                self.config["project"]["storyboard"] = path
+                self.write_config()
+                _, errors, _ = self.errors()
+                self.assertTrue(any("project.storyboard" in error for error in errors), errors)
+
+    def test_rejects_output_collision_with_project_resource(self):
+        asset_dir = self.root / "assets"
+        asset_dir.mkdir()
+        asset = asset_dir / "character.glb"
+        asset.write_bytes(b"fixture")
+        self.config["project"]["resources"] = [
+            {"id": "character", "path": "assets/character.glb", "required": True}
+        ]
+        self.config["workspace"]["intermediate_dir"] = "assets"
+        self.config["stages"][0]["outputs"][0]["path"] = "assets/character.glb"
+        self.write_config()
+        _, errors, _ = self.errors()
+        self.assertTrue(any("overwrite a project input" in error for error in errors), errors)
+
+    def test_rejects_duplicate_tool_and_stage_ids(self):
+        self.config["tools"][1]["id"] = self.config["tools"][0]["id"]
+        self.config["stages"][1]["id"] = self.config["stages"][0]["id"]
+        self.write_config()
+        _, errors, _ = self.errors()
+        self.assertTrue(any("tools[1].id duplicates" in error for error in errors), errors)
+        self.assertTrue(any("duplicate stage id" in error for error in errors), errors)
+
+    def test_rejects_wrong_json_types_for_profile_and_workspace_fields(self):
+        invalid_values = (None, [], False, 1.5, {}, 0)
+        for value in invalid_values:
+            with self.subTest(value=value):
+                self.config = make_config(self.root)
+                self.config["profile"]["width"] = value
+                self.write_config()
+                _, errors, _ = self.errors()
+                self.assertTrue(any("profile.width" in error for error in errors), errors)
+        for value in (None, [], True, 42, {}):
+            with self.subTest(workspace_value=value):
+                self.config = make_config(self.root)
+                self.config["workspace"]["manifest_dir"] = value
+                self.write_config()
+                _, errors, _ = self.errors()
+                self.assertTrue(any("workspace.manifest_dir" in error for error in errors), errors)
+
+    def test_extreme_declared_aspect_ratio_returns_validation_error_not_traceback(self):
+        storyboard = json.loads((self.root / "storyboard.json").read_text(encoding="utf-8"))
+        storyboard["aspect_ratio"] = "9" * 5000 + ":16"
+        (self.root / "storyboard.json").write_text(json.dumps(storyboard), encoding="utf-8")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = pipeline.main(["validate", str(self.config_path)])
+        self.assertEqual(1, result)
+        self.assertIn("aspect_ratio", output.getvalue())
+        self.assertNotIn("Traceback", output.getvalue())
+
+    def test_pipeline_cli_reports_excessive_json_nesting_without_traceback(self):
+        deep_config = self.root / "deep-pipeline.json"
+        deep_config.write_text("[" * 5000 + "0" + "]" * 5000, encoding="utf-8")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = pipeline.main(["validate", str(deep_config)])
+        self.assertEqual(1, result)
+        self.assertIn("nesting", output.getvalue())
+        self.assertNotIn("Traceback", output.getvalue())
 
     def test_rejects_nul_in_storyboard_and_other_path_fields_without_traceback(self):
         for field in ("storyboard", "resource", "workspace", "output"):
@@ -235,6 +306,21 @@ class PipelineValidationTests(unittest.TestCase):
         finally:
             outside.unlink(missing_ok=True)
 
+    def test_rejects_output_symlink_alias_of_pipeline_config_when_available(self):
+        alias = self.root / "project-root"
+        try:
+            os.symlink(self.root, alias, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symbolic links are unavailable in this environment")
+        try:
+            self.config["workspace"]["intermediate_dir"] = "project-root"
+            self.config["stages"][0]["outputs"][0]["path"] = "project-root/pipeline.json"
+            self.write_config()
+            _, errors, _ = self.errors()
+            self.assertTrue(any("overwrite a project input or pipeline configuration" in error for error in errors), errors)
+        finally:
+            alias.unlink(missing_ok=True)
+
     def test_validates_existing_v03_and_v04_storyboards_through_shared_validator(self):
         for relative in (
             "examples/cave-exploration/storyboard.json",
@@ -264,6 +350,61 @@ class PipelineValidationTests(unittest.TestCase):
         self.assertIn("adapter=pending", output.getvalue())
         self.assertIn("blocked (adapter pending;", output.getvalue())
         self.assertNotIn("completed", output.getvalue().lower())
+
+    def test_every_cli_mode_is_read_only_and_does_not_launch_commands_or_network(self):
+        manifest_path = self.root / "run-manifest.json"
+        manifest_path.write_text(
+            json.dumps(pipeline.new_pending_manifest(self.config, self.config_path)), encoding="utf-8"
+        )
+        def snapshot():
+            return {
+                str(path.relative_to(self.root)): (
+                    "symlink" if path.is_symlink() else "directory" if path.is_dir() else "file",
+                    os.readlink(path) if path.is_symlink() else path.read_bytes() if path.is_file() else None,
+                )
+                for path in self.root.rglob("*")
+            }
+        before = snapshot()
+        commands = (
+            ["validate", str(self.config_path)],
+            ["plan", str(self.config_path)],
+            ["dry-run", str(self.config_path)],
+            ["validate-manifest", str(self.config_path), str(manifest_path)],
+        )
+        original_builtin_open = builtins.open
+        original_path_open = Path.open
+        def read_only_open(open_function):
+            def guarded(path, mode="r", *args, **kwargs):
+                if any(flag in mode for flag in ("w", "a", "x", "+")):
+                    raise AssertionError("write-mode file open attempted")
+                return open_function(path, mode, *args, **kwargs)
+            return guarded
+        with mock.patch.object(subprocess, "run", side_effect=AssertionError("external command invoked")), \
+             mock.patch.object(subprocess, "Popen", side_effect=AssertionError("external command invoked")), \
+             mock.patch.object(os, "system", side_effect=AssertionError("shell command invoked")), \
+             mock.patch.object(socket, "socket", side_effect=AssertionError("network socket opened")), \
+             mock.patch.object(urllib.request, "urlopen", side_effect=AssertionError("network request made")), \
+             mock.patch.object(builtins, "open", new=read_only_open(original_builtin_open)), \
+             mock.patch.object(Path, "open", new=read_only_open(original_path_open)), \
+             mock.patch.object(os, "unlink", side_effect=AssertionError("file deletion attempted")), \
+             mock.patch.object(os, "remove", side_effect=AssertionError("file removal attempted")), \
+             mock.patch.object(os, "replace", side_effect=AssertionError("file replacement attempted")), \
+             mock.patch.object(os, "rename", side_effect=AssertionError("file rename attempted")), \
+             mock.patch.object(os, "mkdir", side_effect=AssertionError("directory creation attempted")), \
+             mock.patch.object(os, "rmdir", side_effect=AssertionError("directory removal attempted")):
+            for command in commands:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(0, pipeline.main(command), command)
+        self.assertEqual(before, snapshot())
+
+    def test_configured_stage_order_does_not_change_topological_waves(self):
+        _, errors, _, waves = pipeline.load_and_validate_config(self.config_path)
+        self.assertEqual([], errors)
+        self.config["stages"] = list(reversed(self.config["stages"]))
+        self.write_config()
+        _, errors, _, reversed_waves = pipeline.load_and_validate_config(self.config_path)
+        self.assertEqual([], errors)
+        self.assertEqual(waves, reversed_waves)
 
     def test_dry_run_blocks_stages_on_unverified_tools_and_propagates(self):
         self.config["stages"][1]["adapter_status"] = "implemented"
@@ -312,8 +453,40 @@ class RunManifestTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def write_config(self):
+        self.config_path.write_text(json.dumps(self.config, indent=2), encoding="utf-8")
+
     def write_manifest(self):
         self.manifest_path.write_text(json.dumps(self.manifest, indent=2), encoding="utf-8")
+
+    def completed_blender_manifest(self):
+        validation_output = self.root / ".pipeline" / "work" / "validated-plan.json"
+        blender_output = self.root / ".pipeline" / "work" / "scenes.json"
+        validation_output.parent.mkdir(parents=True, exist_ok=True)
+        validation_output.write_text("validated", encoding="utf-8")
+        blender_output.write_text("scene", encoding="utf-8")
+        self.manifest = pipeline.new_pending_manifest(self.config, self.config_path)
+        validation_stage, blender_stage = self.config["stages"][:2]
+        storyboard_hash = pipeline.sha256_file(self.root / "storyboard.json")
+        validation_hash = pipeline.sha256_file(validation_output)
+        self.manifest["stages"][validation_stage["id"]].update(
+            status="completed", attempts=1,
+            stage_fingerprint=pipeline.stage_fingerprint(
+                self.config, validation_stage, {"storyboard": storyboard_hash}, {}
+            ),
+            artifacts=[{"id": "validated-plan", "path": ".pipeline/work/validated-plan.json", "sha256": validation_hash}],
+        )
+        tool_versions = {"blender": "5.2.3"}
+        blender_entry = self.manifest["stages"][blender_stage["id"]]
+        blender_entry.update(
+            status="completed", attempts=1, tool_versions=tool_versions,
+            stage_fingerprint=pipeline.stage_fingerprint(
+                self.config, blender_stage,
+                {"storyboard": storyboard_hash, "validated-plan": validation_hash}, tool_versions,
+            ),
+            artifacts=[{"id": "scene-package", "path": ".pipeline/work/scenes.json", "sha256": pipeline.sha256_file(blender_output)}],
+        )
+        self.write_manifest()
 
     def test_accepts_pending_manifest_tied_to_current_project(self):
         errors, warnings = pipeline.validate_manifest_file(self.config_path, self.manifest_path)
@@ -329,6 +502,26 @@ class RunManifestTests(unittest.TestCase):
         self.assertEqual(0, result)
         self.assertIn("PASS: run manifest", output.getvalue())
         self.assertEqual(before, after)
+
+    def test_manifest_cli_reports_excessive_json_nesting_without_traceback(self):
+        deep_manifest = self.root / "deep-manifest.json"
+        deep_manifest.write_text("[" * 5000 + "0" + "]" * 5000, encoding="utf-8")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = pipeline.main(["validate-manifest", str(self.config_path), str(deep_manifest)])
+        self.assertEqual(1, result)
+        self.assertIn("nesting", output.getvalue())
+        self.assertNotIn("Traceback", output.getvalue())
+
+    def test_validate_manifest_cli_rejects_unpaired_surrogate_in_tool_version_without_traceback(self):
+        self.config["tools"][0]["version_requirement"] = "\ud800"
+        self.write_config()
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = pipeline.main(["validate-manifest", str(self.config_path), str(self.manifest_path)])
+        self.assertEqual(1, result)
+        self.assertIn("unpaired Unicode surrogate", output.getvalue())
+        self.assertNotIn("Traceback", output.getvalue())
 
     def test_rejects_invalid_status_attempt_count_and_dependency_reference(self):
         entry = self.manifest["stages"]["02-blender-scenes"]
@@ -369,9 +562,113 @@ class RunManifestTests(unittest.TestCase):
         self.write_manifest()
         errors, _ = pipeline.validate_manifest_file(self.config_path, self.manifest_path)
         self.assertEqual([], errors)
+        artifact_path.unlink()
+        errors, _ = pipeline.validate_manifest_file(self.config_path, self.manifest_path)
+        self.assertTrue(any("does not exist as a file" in error for error in errors), errors)
+        artifact_path.write_text("planned fixture", encoding="utf-8")
         artifact_path.write_text("changed output", encoding="utf-8")
         errors, _ = pipeline.validate_manifest_file(self.config_path, self.manifest_path)
         self.assertTrue(any("artifact hash" in error for error in errors))
+
+    def test_rejects_completed_stage_when_adapter_is_still_pending(self):
+        blender_tool = self.config["tools"][0]
+        blender_tool.update(availability="verified", adapter_status="implemented")
+        self.config["stages"][1]["adapter_status"] = "pending"
+        self.write_config()
+        self.completed_blender_manifest()
+        errors, _ = pipeline.validate_manifest_file(self.config_path, self.manifest_path)
+        self.assertTrue(any("adapter" in error and "pending" in error for error in errors), errors)
+
+    def test_rejects_completed_stage_when_required_tool_is_unverified(self):
+        blender_tool = self.config["tools"][0]
+        blender_tool.update(availability="not_checked", adapter_status="implemented")
+        self.config["stages"][1]["adapter_status"] = "implemented"
+        self.write_config()
+        self.completed_blender_manifest()
+        errors, _ = pipeline.validate_manifest_file(self.config_path, self.manifest_path)
+        self.assertTrue(any("availability" in error and "blender" in error for error in errors), errors)
+
+    def test_rejects_completed_stage_when_tool_adapter_is_pending(self):
+        blender_tool = self.config["tools"][0]
+        blender_tool.update(availability="verified", adapter_status="pending")
+        self.config["stages"][1]["adapter_status"] = "implemented"
+        self.write_config()
+        self.completed_blender_manifest()
+        errors, _ = pipeline.validate_manifest_file(self.config_path, self.manifest_path)
+        self.assertTrue(any("tool" in error and "adapter" in error and "pending" in error for error in errors), errors)
+
+    def test_rejects_completed_stage_until_dependencies_are_completed(self):
+        self.config["tools"][0].update(availability="verified", adapter_status="implemented")
+        self.config["stages"][1]["adapter_status"] = "implemented"
+        self.write_config()
+        self.completed_blender_manifest()
+        validation_entry = self.manifest["stages"]["01-validate-project"]
+        validation_entry.update(
+            status="pending", attempts=0, error=None, artifacts=[], stage_fingerprint=None, tool_versions={}
+        )
+        self.write_manifest()
+        errors, _ = pipeline.validate_manifest_file(self.config_path, self.manifest_path)
+        self.assertTrue(any("until all dependencies are completed" in error for error in errors), errors)
+
+    def test_completed_stage_requires_each_artifact_exactly_once(self):
+        self.config["tools"][0].update(availability="verified", adapter_status="implemented")
+        self.config["stages"][1]["adapter_status"] = "implemented"
+        self.write_config()
+        self.completed_blender_manifest()
+        stage_entry = self.manifest["stages"]["02-blender-scenes"]
+        stage_entry["artifacts"] = []
+        self.write_manifest()
+        errors, _ = pipeline.validate_manifest_file(self.config_path, self.manifest_path)
+        self.assertTrue(any("every configured output exactly once" in error for error in errors), errors)
+        self.completed_blender_manifest()
+        stage_entry = self.manifest["stages"]["02-blender-scenes"]
+        stage_entry["artifacts"].append(dict(stage_entry["artifacts"][0]))
+        self.write_manifest()
+        errors, _ = pipeline.validate_manifest_file(self.config_path, self.manifest_path)
+        self.assertTrue(any("unknown or duplicated" in error for error in errors), errors)
+
+    def test_completed_fingerprint_binds_effective_tool_version(self):
+        self.config["tools"][0].update(availability="verified", adapter_status="implemented")
+        self.config["stages"][1]["adapter_status"] = "implemented"
+        self.write_config()
+        self.completed_blender_manifest()
+        self.manifest["stages"]["02-blender-scenes"]["tool_versions"]["blender"] = "5.2.4"
+        self.write_manifest()
+        errors, _ = pipeline.validate_manifest_file(self.config_path, self.manifest_path)
+        self.assertTrue(any("stage_fingerprint is stale" in error for error in errors), errors)
+
+    def test_completed_stage_rejects_missing_or_empty_tool_version(self):
+        self.config["tools"][0].update(availability="verified", adapter_status="implemented")
+        self.config["stages"][1]["adapter_status"] = "implemented"
+        self.write_config()
+        self.completed_blender_manifest()
+        self.manifest["stages"]["02-blender-scenes"]["tool_versions"] = {}
+        self.write_manifest()
+        errors, _ = pipeline.validate_manifest_file(self.config_path, self.manifest_path)
+        self.assertTrue(any("exactly the tools used" in error for error in errors), errors)
+        self.completed_blender_manifest()
+        self.manifest["stages"]["02-blender-scenes"]["tool_versions"]["blender"] = "  "
+        self.write_manifest()
+        errors, _ = pipeline.validate_manifest_file(self.config_path, self.manifest_path)
+        self.assertTrue(any("non-empty version strings" in error for error in errors), errors)
+
+    def test_config_changes_invalidate_completed_stage_fingerprint(self):
+        artifact_path = self.root / ".pipeline" / "work" / "validated-plan.json"
+        artifact_path.parent.mkdir(parents=True)
+        artifact_path.write_text("planned fixture", encoding="utf-8")
+        stage = self.config["stages"][0]
+        input_hashes = {"storyboard": pipeline.sha256_file(self.root / "storyboard.json")}
+        self.manifest["stages"][stage["id"]].update(
+            status="completed", attempts=1,
+            stage_fingerprint=pipeline.stage_fingerprint(self.config, stage, input_hashes, {}),
+            artifacts=[{"id": "validated-plan", "path": ".pipeline/work/validated-plan.json", "sha256": pipeline.sha256_file(artifact_path)}],
+        )
+        self.write_manifest()
+        self.config["profile"]["limits"]["cpu_threads"] = 3
+        self.write_config()
+        errors, warnings = pipeline.validate_manifest_file(self.config_path, self.manifest_path)
+        self.assertTrue(any("stage_fingerprint is stale" in error for error in errors), errors)
+        self.assertTrue(any("pipeline config changed" in warning for warning in warnings), warnings)
 
     def test_changed_project_input_invalidates_completed_stage_for_resume(self):
         artifact_path = self.root / ".pipeline" / "work" / "validated-plan.json"

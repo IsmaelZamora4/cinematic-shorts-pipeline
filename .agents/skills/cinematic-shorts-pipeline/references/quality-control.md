@@ -27,3 +27,10 @@ Registra cada comprobación como **aprobada**, **fallida**, **sin revisar** o **
 - Tras el render solicitado, inspecciona fotogramas representativos y reproduce el archivo; valida lectura, dimensiones, FPS, duración, audio y subtítulos. Informa comandos y resultados observados.
 
 Los scripts incluidos validan el empaquetado de la skill, los datos del storyboard, el DAG del pipeline y manifiestos existentes. No ejecutan etapas de producción, renderizan, inspeccionan calidad audiovisual, verifican licencias ni juzgan la narrativa.
+
+## Puertas de seguridad del pipeline
+
+- **Automática:** `validate`, `plan`, `dry-run` y `validate-manifest` no deben crear, eliminar ni modificar archivos; no deben invocar procesos externos ni abrir conexiones. La suite compara snapshots de rutas/contenidos y bloquea aperturas de escritura, operaciones comunes del sistema de archivos, procesos y sockets.
+- **Automática:** un manifiesto con estado `completed` solo se acepta si el adaptador de etapa está implementado, las herramientas están declaradas verificadas y sus adaptadores están implementados; dependencias, salidas, hashes y fingerprints deben coincidir.
+- **Pendiente de ejecución:** las declaraciones `availability: verified` no prueban que el ejecutable real exista ni que sea compatible. La ejecución y reanudación permanecen fuera del alcance; deben volver a validar entradas, versiones, límites y salidas al implementarse.
+- **CI:** la matriz fija Ubuntu 24.04 y 26.04. El soporte remoto se declara aprobado solo después de que ambos jobs terminen con éxito. La suite de Windows puede omitir la prueba de symlink si el sistema no concede ese permiso.

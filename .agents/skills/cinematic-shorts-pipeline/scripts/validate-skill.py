@@ -14,6 +14,7 @@ REQUIRED = [
     "references/cinematography.md", "references/animation-3d.md",
     "references/remotion-integration.md", "references/voice-and-captions.md",
     "references/quality-control.md", "references/cinematic-quality-rubric.md",
+    "references/pipeline-security.md",
     "scripts/validate-skill.py", "scripts/validate-storyboard.py",
     "scripts/pipeline.py",
     "templates/storyboard.json", "templates/scene-config.json", "templates/render-config.json",

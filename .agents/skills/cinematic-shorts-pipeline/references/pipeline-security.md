@@ -1,0 +1,37 @@
+# Seguridad del pipeline local
+
+## Alcance y evidencia
+
+Revisión local de los validadores de storyboard y pipeline, el manifiesto, el DAG, los comandos CLI y el workflow. Se ejecutaron pruebas de regresión en Windows. No se ejecutaron motores audiovisuales, se instalaron dependencias ni se escribió un manifiesto de producción. Dos pruebas de symlink quedaron omitidas porque Windows no permitió crear enlaces; deben correr en CI Linux.
+
+## Hallazgos reproducibles corregidos
+
+| Severidad | Hallazgo | Reproducción y efecto | Corrección |
+| --- | --- | --- | --- |
+| Baja | Un manifiesto podía marcar como `completed` una etapa aunque su adaptador estuviera pendiente, una herramienta no estuviera verificada o su adaptador siguiera pendiente. | Preparar un manifiesto con hashes y fingerprint coherentes, pero con esos estados de herramienta/adaptador. `validate-manifest` lo aceptaba como completado. No hay reanudación ni ejecución en v0.5/v0.6, así que el efecto actual se limita a una decisión de validez incorrecta. | La validación rechaza `completed` si el adaptador de etapa no está implementado, la disponibilidad de una herramienta no está declarada `verified`, o el adaptador de herramienta no está implementado. |
+| Baja | JSON con anidamiento extremo podía escapar como `RecursionError` en vez de error de validación. | Un archivo con 5.000 arrays anidados provocaba excepción inesperada en las superficies que comparten `parse_json`. | El parser compartido convierte `RecursionError` a `ValueError` controlado; los validadores/CLI existentes lo reportan sin traceback. |
+| Baja | La aceptación de JSON demasiado anidado dependía del límite interno del parser de Python. | Una entrada con 5.000 niveles fue rechazada en una versión y aceptada por `json.loads()` en Python 3.13.5, haciendo fallar de forma distinta la suite entre runtimes. | Un escáner previo cuenta arrays/objetos fuera de cadenas y aplica un máximo documentado de 128 niveles; escapado y comillas no cuentan como estructura. |
+| Baja | Un sustituto Unicode sin pareja podía pasar la validación y romper la serialización UTF-8 del fingerprint. | `tools[].version_requirement` con JSON `"\ud800"` llegaba a `_canonical_bytes()` y causaba `UnicodeEncodeError` en `validate-manifest`. | El parser compartido rechaza sustitutos sin pareja en claves y valores con un diagnóstico controlado; conserva texto Unicode válido y pares sustitutos emoji. El algoritmo de fingerprint no cambia. |
+| Baja | Una cadena `aspect_ratio` de miles de dígitos llegaba a `int()` en la comparación del perfil y provocaba `ValueError` en Python 3.11+. | Un storyboard válido sintácticamente para la expresión regular, pero con componente de 5.000 dígitos, hacía fallar `pipeline validate` con traceback. | El contrato storyboard limita cada componente a 128 dígitos. El pipeline usa ese mismo límite antes de convertir los componentes. |
+
+Las severidades son bajas porque los efectos se limitaban al proceso local de validación o a la integridad declarada del manifiesto; no existe ejecución automática de etapas que consuma estos estados.
+
+## Controles comprobados
+
+- `validate`, `plan`, `dry-run` y `validate-manifest` se ejecutan en una prueba con apertura de escritura, operaciones comunes de creación/borrado/reemplazo, procesos externos y sockets bloqueados. También se comparan rutas y contenido de todos los archivos antes y después.
+- Las rutas de entrada/salida usan el helper de confinamiento del proyecto, que rechaza rutas absolutas, traversal, NUL y symlinks que escapan de la raíz. Las salidas se cotejan con inputs y entre sí para evitar sobrescrituras declaradas.
+- Los DAGs producen olas ordenadas por ID independientemente del orden de declaración. Las etapas completadas requieren dependencias completas, salidas configuradas exactas, hashes correctos y fingerprints actuales.
+- El parser JSON compartido limita anidamiento a 128 niveles antes de invocar `json.loads()` y rechaza sustitutos Unicode aislados antes de que una serialización UTF-8 o fingerprint falle.
+- CI mantiene `contents: read`, fija las actions oficiales a SHAs completos y solicita una matriz `ubuntu-24.04`/`ubuntu-26.04`.
+
+## Riesgos y evidencia pendientes
+
+- La suite local en Windows omite las dos pruebas de symlink porque el sistema no permite crearlos. Quedan habilitadas en Linux; la matriz nueva todavía necesita una ejecución remota final para demostrar ambos runners.
+- No se fijó un límite de bytes para JSON ni para archivos que se leen al calcular SHA-256. No se reprodujo agotamiento de recursos con archivos grandes; definir límites requiere acordar tamaños máximos válidos para storyboards, manifiestos y artefactos.
+- No se probó una carrera que sustituya un symlink entre la resolución de ruta y la lectura de hash. Los comandos actuales no escriben artefactos; cualquier adaptador futuro debe volver a validar rutas justo antes de operar y evitar seguir enlaces durante aperturas de escritura.
+- `availability: verified` es una declaración del archivo de configuración. `validate-manifest` no inspecciona el binario ni demuestra compatibilidad del runtime; las versiones deben registrarse y verificarse por un adaptador futuro antes de reutilizar resultados.
+- No se revisó calidad de render, actuación, audio, licencias de recursos ni seguridad de adaptadores audiovisuales, porque esos adaptadores no existen y no se generaron medios.
+
+## Próximos controles antes de ejecución
+
+Antes de implementar adaptadores, definir topes de tamaño/tiempo, verificar versiones reales, comprobar rutas con operaciones no-follow y añadir pruebas de fallo parcial e invalidación descendiente. La validación de un manifiesto no equivale a ejecutar ni a reanudar una tarea.

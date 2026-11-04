@@ -18,6 +18,8 @@ ROOT_MOTION_MODES = {"stationary", "in-place-turn", "travel", "combined"}
 FOOT_STATES = {"planted", "support", "swing", "airborne", "offscreen", "not-applicable"}
 HAND_SIDES = {"left", "right", "both"}
 HAND_CONTACT_STATES = {"none", "approach", "touch", "grasp", "release", "maintain"}
+MAX_ASPECT_RATIO_COMPONENT_DIGITS = 128
+MAX_JSON_NESTING = 128
 
 
 def _non_empty_string(value):
@@ -225,6 +227,8 @@ def _validate_animation(data, label, scene_duration):
 def _reject_duplicate_keys(pairs):
     result = {}
     for key, value in pairs:
+        if any(0xD800 <= ord(character) <= 0xDFFF for character in key):
+            raise ValueError("JSON strings and object keys must not contain unpaired Unicode surrogate code points")
         if key in result:
             raise ValueError(f"duplicate JSON key: {key}")
         result[key] = value
@@ -235,13 +239,62 @@ def _reject_nonstandard_constant(value):
     raise ValueError(f"non-standard JSON number: {value}")
 
 
+def _check_json_nesting(text):
+    """Reject containers deeper than MAX_JSON_NESTING without relying on json's recursion limit."""
+    depth = 0
+    in_string = False
+    escaped = False
+    for character in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+        elif character in "[{":
+            depth += 1
+            if depth > MAX_JSON_NESTING:
+                raise ValueError(
+                    f"JSON nesting exceeds maximum depth of {MAX_JSON_NESTING}; reduce nested arrays/objects"
+                )
+        elif character in "]}":
+            depth = max(0, depth - 1)
+
+
+def _reject_unpaired_surrogates(value):
+    """Reject strings that cannot be encoded as valid UTF-8 scalar values."""
+    pending = [value]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, str):
+            if any(0xD800 <= ord(character) <= 0xDFFF for character in current):
+                raise ValueError("JSON strings and object keys must not contain unpaired Unicode surrogate code points")
+        elif isinstance(current, dict):
+            pending.extend(current.keys())
+            pending.extend(current.values())
+        elif isinstance(current, list):
+            pending.extend(current)
+
+
 def parse_json(text):
-    """Parse strict JSON; reject duplicate keys and NaN/Infinity values."""
-    return json.loads(
-        text,
-        object_pairs_hook=_reject_duplicate_keys,
-        parse_constant=_reject_nonstandard_constant,
-    )
+    """Parse strict JSON with deterministic depth, key, number, and Unicode checks."""
+    _check_json_nesting(text)
+    try:
+        value = json.loads(
+            text,
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonstandard_constant,
+        )
+    except RecursionError as exc:
+        raise ValueError(
+            f"JSON parser recursion limit reached; reduce nesting to {MAX_JSON_NESTING} levels or fewer"
+        ) from exc
+    _reject_unpaired_surrogates(value)
+    return value
 
 
 def validate(data):
@@ -267,8 +320,16 @@ def validate(data):
     if not isinstance(data.get("logline"), str) or not data["logline"].strip():
         errors.append("logline must be a non-empty string")
     aspect_ratio = data.get("aspect_ratio")
-    if aspect_ratio is not None and (not isinstance(aspect_ratio, str) or not re.fullmatch(r"[1-9][0-9]*:[1-9][0-9]*", aspect_ratio)):
-        errors.append("aspect_ratio must use the form 'width:height' with positive integers")
+    if aspect_ratio is not None:
+        if not isinstance(aspect_ratio, str) or not re.fullmatch(r"[1-9][0-9]*:[1-9][0-9]*", aspect_ratio):
+            errors.append("aspect_ratio must use the form 'width:height' with positive integers")
+        elif any(
+            len(component) > MAX_ASPECT_RATIO_COMPONENT_DIGITS
+            for component in aspect_ratio.split(":")
+        ):
+            errors.append(
+                f"aspect_ratio components must not exceed {MAX_ASPECT_RATIO_COMPONENT_DIGITS} digits"
+            )
 
     scenes = data.get("scenes")
     if not isinstance(scenes, list) or not scenes:

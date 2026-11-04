@@ -123,7 +123,7 @@ class StoryboardValidationTests(unittest.TestCase):
     def test_rejects_bad_caption_shape_order_and_bounds(self):
         data = json.loads(json.dumps(self.valid))
         data["captions"] = [
-            {"text": "Second", "start_ms": 2000, "end_ms": 2500},
+            {"text": "Second", "start_ms": 5000, "end_ms": 2500},
             {"text": "First", "start_ms": 1000, "end_ms": 500},
             {"text": " ", "start_ms": True, "end_ms": 7000},
             "not an object",
@@ -174,6 +174,33 @@ class StoryboardValidationTests(unittest.TestCase):
         with self.assertRaises(json.JSONDecodeError):
             story_validator.parse_json('{"fps": 30,}')
 
+    def test_parse_enforces_explicit_json_nesting_limit(self):
+        allowed = "[" * story_validator.MAX_JSON_NESTING + "0" + "]" * story_validator.MAX_JSON_NESTING
+        parsed = story_validator.parse_json(allowed)
+        for _ in range(story_validator.MAX_JSON_NESTING):
+            self.assertIsInstance(parsed, list)
+            parsed = parsed[0]
+        self.assertEqual(0, parsed)
+
+        excessive = "[" * (story_validator.MAX_JSON_NESTING + 1) + "0" + "]" * (story_validator.MAX_JSON_NESTING + 1)
+        with self.assertRaisesRegex(ValueError, "maximum depth of 128"):
+            story_validator.parse_json(excessive)
+
+    def test_parse_ignores_json_structure_inside_escaped_strings(self):
+        parsed = story_validator.parse_json(r'{"text":"brackets [{]} and escaped quote: \" remain text"}')
+        self.assertEqual('brackets [{]} and escaped quote: " remain text', parsed["text"])
+
+    def test_parse_rejects_unpaired_unicode_surrogates_in_keys_and_values(self):
+        for source in (r'{"value":"\ud800"}', r'{"\udfff":"value"}'):
+            with self.subTest(source=source):
+                with self.assertRaisesRegex(ValueError, "unpaired Unicode surrogate"):
+                    story_validator.parse_json(source)
+
+    def test_parse_preserves_valid_unicode_and_surrogate_pairs(self):
+        parsed = story_validator.parse_json(r'{"español":"Núñez", "emoji":"\ud83d\ude0a"}')
+        self.assertEqual("Núñez", parsed["español"])
+        self.assertEqual("😊", parsed["emoji"])
+
     def test_rejects_invalid_aspect_ratio_and_scene_past_total(self):
         data = json.loads(json.dumps(self.valid))
         data["aspect_ratio"] = "wide"
@@ -181,6 +208,12 @@ class StoryboardValidationTests(unittest.TestCase):
         errors = story_validator.validate(data)
         self.assertTrue(any("aspect_ratio" in error for error in errors))
         self.assertTrue(any("exceeds total_frames" in error for error in errors))
+
+    def test_rejects_aspect_ratio_components_exceeding_safe_digit_limit(self):
+        data = json.loads(json.dumps(self.valid))
+        data["aspect_ratio"] = "9" * 129 + ":16"
+        errors = story_validator.validate(data)
+        self.assertTrue(any("aspect_ratio" in error and "128 digits" in error for error in errors), errors)
 
     def test_accepts_optional_cinematography_contract(self):
         data = json.loads(json.dumps(self.valid))
@@ -326,6 +359,19 @@ class StoryboardValidationTests(unittest.TestCase):
         self.assertNotIn("Traceback", result.stderr)
 
 
+    def test_storyboard_cli_reports_excessive_nesting_without_traceback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "deep.json"
+            path.write_text("[" * 5000 + "0" + "]" * 5000, encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, "-B", str(ROOT / "scripts" / "validate-storyboard.py"), str(path)],
+                capture_output=True, text=True, check=False,
+            )
+        self.assertEqual(2, result.returncode)
+        self.assertIn("nesting", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+
+
 class SkillValidationTests(unittest.TestCase):
     def test_current_skill_is_valid(self):
         self.assertEqual([], skill_validator.validate(ROOT))
@@ -400,6 +446,13 @@ class SkillValidationTests(unittest.TestCase):
             (root / "bad.json").write_text('{"value": NaN}', encoding="utf-8")
             errors = skill_validator.validate_json_files(root)
         self.assertTrue(any("invalid JSON" in error for error in errors))
+
+    def test_skill_validator_reports_excessive_json_nesting(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "deep.json").write_text("[" * 5000 + "0" + "]" * 5000, encoding="utf-8")
+            errors = skill_validator.validate_json_files(root)
+        self.assertTrue(any("nesting" in error for error in errors), errors)
 
     def test_skill_validator_reports_duplicate_json_keys(self):
         with tempfile.TemporaryDirectory() as temp:

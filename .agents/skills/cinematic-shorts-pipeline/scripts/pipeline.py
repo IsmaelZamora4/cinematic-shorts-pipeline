@@ -250,6 +250,10 @@ def validate_config(data, config_path):
             if (
                 width_valid and height_valid and isinstance(aspect_ratio, str)
                 and re.fullmatch(r"[1-9][0-9]*:[1-9][0-9]*", aspect_ratio)
+                and all(
+                    len(component) <= STORYBOARD_VALIDATOR.MAX_ASPECT_RATIO_COMPONENT_DIGITS
+                    for component in aspect_ratio.split(":")
+                )
             ):
                 aspect_width, aspect_height = (int(value) for value in aspect_ratio.split(":"))
                 if profile["width"] * aspect_height != profile["height"] * aspect_width:
@@ -568,6 +572,10 @@ def validate_manifest(manifest, config, config_path, manifest_path):
         for output in stage.get("outputs", [])
         if isinstance(output, dict) and isinstance(output.get("id"), str)
     }
+    configured_tools = {
+        tool["id"]: tool for tool in config.get("tools", [])
+        if isinstance(tool, dict) and isinstance(tool.get("id"), str)
+    }
     artifact_digests = {}
     for candidate in stage_entries.values():
         if not isinstance(candidate, dict) or not isinstance(candidate.get("artifacts"), list):
@@ -624,6 +632,20 @@ def validate_manifest(manifest, config, config_path, manifest_path):
         elif state == "completed":
             if not isinstance(attempts, int) or attempts < 1 or error_text is not None:
                 errors.append(f"{label} completed state requires an attempt and no error")
+            if stage.get("adapter_status") != "implemented":
+                errors.append(f"{label} cannot be completed while its adapter is pending")
+            for tool_id in stage.get("tools", []):
+                tool = configured_tools.get(tool_id)
+                if tool is None:
+                    continue
+                if tool.get("availability") != "verified":
+                    errors.append(
+                        f"{label} cannot be completed because tool {tool_id} availability is not verified"
+                    )
+                if tool.get("adapter_status") != "implemented":
+                    errors.append(
+                        f"{label} cannot be completed because tool {tool_id} adapter is pending"
+                    )
             if not isinstance(declared_stage_fingerprint, str) or not FINGERPRINT.fullmatch(declared_stage_fingerprint):
                 errors.append(f"{label} completed state requires a stage fingerprint")
             dependencies = stage.get("depends_on", [])

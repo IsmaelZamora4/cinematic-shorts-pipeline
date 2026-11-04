@@ -37,7 +37,18 @@
 - Contrato/validador de manifiesto con estados, intentos, dependencias, fingerprints y hash de salidas; reanudación selectiva queda diseñada, no ejecutada.
 - Workflow de CI mínimo para pruebas y validadores; adaptadores audiovisuales siguen pendientes.
 
-**Verificación de v0.5 (2026-11-04):** 55 pruebas ejecutadas; 54 aprobadas y 1 omitida porque el entorno Windows no permitió crear symlinks. `validate-skill.py`, los cuatro storyboards, las dos configuraciones del pipeline y `dry-run` pasaron. `validate-manifest` pasó mediante pruebas unitarias. El workflow de GitHub Actions está configurado, pero no se ejecutó en GitHub durante esta preparación.
+**Verificación de v0.5 (2026-11-04):** 61 pruebas ejecutadas; 60 aprobadas y 1 omitida porque el entorno Windows no permitió crear symlinks. `validate-skill.py`, los cuatro storyboards, las dos configuraciones del pipeline y `dry-run` pasaron. `validate-manifest` pasó mediante pruebas unitarias. GitHub Actions terminó correctamente en el commit `862bb4896f539177aefef46c15ab9053106da547` (PR #2); el squash integrado en `main` es `b78e3ea347cde94f68c9b010f276ea4ea0106406`.
+
+## v0.6 — Quality Assurance & Security Hardening (en revisión)
+
+- Endurecer aceptación de manifiestos completos: rechazar adaptadores pendientes, herramientas no verificadas, dependencias incompletas y artefactos/fingerprints inconsistentes.
+- Convertir errores previsibles de JSON profundo y relaciones de aspecto malformadas en diagnósticos controlados; fijar el límite de 128 dígitos por componente de `aspect_ratio`.
+- Verificar de forma automatizada que `validate`, `plan`, `dry-run` y `validate-manifest` no escriben ni borran archivos, no lanzan procesos y no abren conexiones.
+- Actualizar `actions/checkout` a v7.0.1 y `actions/setup-python` a v7.1.0; ambos manifiestos oficiales declaran Node.js 24 y el workflow los fija por SHA completo.
+- Sustituir `ubuntu-latest` por una matriz pequeña `ubuntu-24.04`/`ubuntu-26.04`, mantener `contents: read` y validar también dry-run y la plantilla storyboard.
+- Registrar hallazgos, severidad, evidencia y riesgos pendientes en `references/pipeline-security.md`.
+
+**Verificación local (2026-11-04):** 87 pruebas ejecutadas en Python 3.12 y 3.13; 85 aprobadas y 2 omitidas porque este entorno Windows no permite crear symlinks. `validate-skill.py`, los cuatro storyboards, las dos configuraciones del pipeline y ambos `dry-run` pasaron. `validate-manifest` y la garantía de solo lectura de las cuatro operaciones CLI se cubrieron en la suite. Se fija un máximo explícito de 128 niveles JSON y se rechazan sustitutos Unicode sin pareja; tildes, eñes y pares sustitutos emoji válidos se conservan. `git diff --check` pasó. El workflow y los comandos se revisaron localmente; no hay parser YAML ni `actionlint` instalado, así que la sintaxis no recibió validación automatizada local. **Pendiente de evidencia remota:** ambos jobs de GitHub Actions deben terminar correctamente antes de declarar compatibles las imágenes 24.04/26.04; no se hizo push ni se abrió PR en esta fase.
 
 ## Siguiente bloque — adaptadores de producción (futuro)
 
