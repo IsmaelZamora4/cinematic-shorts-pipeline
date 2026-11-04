@@ -26,6 +26,7 @@ REQUIRED = [
     "examples/forest-storm/plan.md", "examples/forest-storm/storyboard.json",
     "examples/abandoned-research-station/plan.md",
     "examples/abandoned-research-station/storyboard.json",
+    "examples/night-station/plan.md", "examples/night-station/storyboard.json",
     "examples/cave-exploration/pipeline.json", "tests/test_pipeline.py",
     "references/pipeline-orchestration.md",
 ]

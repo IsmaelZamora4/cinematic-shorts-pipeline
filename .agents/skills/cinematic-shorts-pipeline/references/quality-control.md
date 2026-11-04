@@ -6,6 +6,11 @@ Registra cada comprobación como **aprobada**, **fallida**, **sin revisar** o **
 
 - **Encargo:** plataforma/formato, duración, idioma, tono, entregables, restricciones y autorización anotados.
 - **Historia:** objetivo, obstáculo, riesgo, giro y final claros; hechos separados de la ficción.
+- **Storytelling — plan:** hook presenta pregunta/premisa; cada beat cambia acción o conocimiento; progresión causal conduce a revelación/cierre; cada plano tiene función y la voz/pausa/corte se relacionan con el beat. Registra evidencia escrita y corrección; sin puntos ni puntuación global arbitraria.
+- **Audio — automático:** si existe `narrative_timing`, validar origen declarado del reloj, procedencia de anclas, referencias a escenas, orden, no solape, cortes puntuales y límites de `voiceover.duration_ms`. Esto valida consistencia declarada, no existencia de grabación ni sincronía.
+- **Audio — reproducción:** con pista real, reproducir y revisar duración, pausas, acción visual y cortes; registra archivo/intervalo/método. Sin grabación, mantener tiempos como estimados. No aprobar alineación palabra por palabra sin alineador o revisión manual con evidencia.
+- **Narrativa — still:** un fotograma puede probar legibilidad de una acción/pista concreta, no el ritmo, causalidad o claridad total de la historia.
+- **Narrativa — secuencia:** reproducción completa verifica progresión, cambio de información, continuidad espacial y causalidad, así como si cada corte y cierre llegan en el momento previsto.
 - **Estética/recursos:** reglas visuales coherentes; fuente/licencia/compatibilidad exactas comprobadas o incertidumbre declarada.
 - **Storyboard — automático:** JSON, campos, enums/rangos opcionales, IDs, tiempos, captions y cobertura total pasan validadores.
 - **Storyboard — intención cinematográfica:** por plano se puede identificar primer foco, acción, información nueva, fuente de luz y razón del corte; continuidad de eje, dirección y mirada no se contradice. Esto aprueba el plan escrito, no su imagen.

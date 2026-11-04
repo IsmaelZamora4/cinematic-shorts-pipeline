@@ -26,6 +26,8 @@ Los proyectos pueden versionar un `pipeline.json` con `pipeline_version: 1`, ind
 
 Los captions usan intervalos `[start_ms, end_ms)`: solapes rechazados por defecto. Un solape intencional requiere `overlap_exception` no vacío en el caption que empieza después; documenta su motivo.
 
+Para enlazar voz y planos, `narrative_timing` es opcional en `schema_version: 1`: etiqueta el reloj como estimado o grabado y anota beats, pausas y cortes con anclas referidas a escenas. Con grabación real, usa su duración como reloj y vuelve a revisar captions. Las anclas no demuestran sincronía; no declares alineación palabra a palabra sin evidencia de alineador o revisión manual.
+
 Guarda paquetes nuevos en `deliverables/<slug>/` con un brief/plan y `storyboard.json`. Usa un slug estable y conserva los entregables existentes; no muevas ni sobrescribas paquetes anteriores al crear uno nuevo.
 
 ## Estado de capacidad

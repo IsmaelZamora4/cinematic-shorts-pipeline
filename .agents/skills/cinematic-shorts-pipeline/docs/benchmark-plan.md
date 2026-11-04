@@ -2,6 +2,16 @@
 
 **Estado:** protocolo propuesto; no se han medido herramientas, tiempos, RAM/VRAM, calidad ni costes comparativos. No generar medios durante planificación. Cualquier prueba que produzca still, audio o render requiere autorización explícita.
 
+## Antecedente narrativo: pieza de Gengar
+
+La revisión anterior reportó estos metadatos del video analizado: duración 40.53 s, 1080×1920, 30 FPS y loudness aproximado de −14.4 LUFS. Son datos de esa pieza tal como fueron comunicados; el archivo y método de medición no están disponibles en esta auditoría, así que no se repitieron ni se presentan como resultados nuevos.
+
+- **Observación reportada:** esos valores describen una pieza vertical concreta. No son objetivos de duración, resolución, FPS o loudness para otros proyectos.
+- **Inferencias de trabajo, no hallazgos de reproducción:** una pieza extensa puede contener varios cambios de información; el ritmo debe juzgarse por función y causalidad del plano, no por copiar una duración total. La voz puede organizar pausas y transiciones si su pista real se conserva como reloj.
+- **Pendiente:** fuente/versiones del video y herramientas, método/ponderación LUFS, corte y transcript exactos, marcas de inicio/fin por plano, alineación de voz y captions, y reproducción independiente. No se conocen aquí cortes, tiempos por palabra, retención ni preferencias de espectadores.
+
+No se copian personajes, texto, secuencias, música ni identidad visual de la pieza. El ejemplo incluido en esta skill es una historia original que solo demuestra el protocolo.
+
 ## Propósito
 
 Comparar versiones futuras de técnicas, skills o herramientas con el mismo encargo, hardware y rúbrica, para elegir una ruta local mantenible. No se usa un resultado anecdótico ni puntuaciones inventadas como línea base.
@@ -42,6 +52,21 @@ Measure-Command { python -B scripts/validate-storyboard.py examples/cave-explora
 | Licencias/uso comercial | Revisar licencia exacta de código, modelo, textura, voz, fuente y dataset; atribución, redistribución y uso comercial | URL, texto/versión/fecha, obligaciones e incertidumbres |
 | Costo adicional | Distinguir gratis, pago único, suscripción, créditos, hardware y tiempo de setup; confirmar precios vigentes | Moneda/unidad/fecha y supuesto; no imputar precio no verificado |
 | Mantenimiento | Revisión de actividad/versionado, dependencias, docs, compatibilidad y coste de actualizaciones | Fecha de última versión observada, esfuerzo de actualización y riesgos |
+
+## Revisión de storytelling en cada comparación
+
+Usa el mismo brief original y anota evidencia por beat y corte; no asignes una puntuación global ni métricas de retención sin un estudio definido.
+
+| Pregunta | Qué registrar | Bloqueo/corrección |
+| --- | --- | --- |
+| ¿El hook presenta una pregunta o contradicción concreta? | Primera imagen/acción y primera información que recibe el público | Bloquea si solo promete una emoción sin establecer la premisa; adelanta la imagen o acción que la hace legible |
+| ¿Cada plano cambia acción o conocimiento? | Función del plano y dato anterior/nuevo | Bloquea la repetición sin propósito; combina, recorta o asigna una función distinta |
+| ¿Voz, pausa y visual se relacionan con el beat? | Ancla temporal, base estimada/medida/revisada, acción visible y motivo del corte | Bloquea si se afirma sincronía sin evidencia; reubica el corte desde la grabación o registra la intención de contrapunto |
+| ¿La revelación y cierre derivan de causas previas? | Pista sembrada, decisión/consecuencia y pregunta que queda abierta | Bloquea giros sin preparación; siembra la pista o cierra una pregunta anterior |
+| ¿La historia se lee en 9:16? | Still a tamaño de teléfono: personaje, acción, pista, dirección y espacio seguro | Bloquea cuando un elemento indispensable queda oculto; cambia escala, posición, luz o encuadre |
+| ¿Se conserva geografía y continuidad? | Eje, lado de pantalla, orientación, mirada, objetos, luz y estado de acción por corte | Bloquea contradicciones no intencionales; añade plano puente o restablece dirección |
+
+La tabla es un protocolo de juicio con evidencia, no una suite automática. El validador solo comprueba contratos declarados y tiempos consistentes; fotogramas y reproducción tienen puertas independientes.
 
 ## Reglas de decisión
 

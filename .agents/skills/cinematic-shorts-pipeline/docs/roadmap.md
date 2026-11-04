@@ -39,7 +39,7 @@
 
 **Verificación de v0.5 (2026-11-04):** 61 pruebas ejecutadas; 60 aprobadas y 1 omitida porque el entorno Windows no permitió crear symlinks. `validate-skill.py`, los cuatro storyboards, las dos configuraciones del pipeline y `dry-run` pasaron. `validate-manifest` pasó mediante pruebas unitarias. GitHub Actions terminó correctamente en el commit `862bb4896f539177aefef46c15ab9053106da547` (PR #2); el squash integrado en `main` es `b78e3ea347cde94f68c9b010f276ea4ea0106406`.
 
-## v0.6 — Quality Assurance & Security Hardening (en revisión)
+## v0.6 — Quality Assurance & Security Hardening (integrada en `main` mediante PR #3)
 
 - Endurecer aceptación de manifiestos completos: rechazar adaptadores pendientes, herramientas no verificadas, dependencias incompletas y artefactos/fingerprints inconsistentes.
 - Convertir errores previsibles de JSON profundo y relaciones de aspecto malformadas en diagnósticos controlados; fijar el límite de 128 dígitos por componente de `aspect_ratio`.
@@ -49,6 +49,16 @@
 - Registrar hallazgos, severidad, evidencia y riesgos pendientes en `references/pipeline-security.md`.
 
 **Verificación local (2026-11-04):** 87 pruebas ejecutadas en Python 3.12 y 3.13; 85 aprobadas y 2 omitidas porque este entorno Windows no permite crear symlinks. `validate-skill.py`, los cuatro storyboards, las dos configuraciones del pipeline y ambos `dry-run` pasaron. `validate-manifest` y la garantía de solo lectura de las cuatro operaciones CLI se cubrieron en la suite. Se fija un máximo explícito de 128 niveles JSON y se rechazan sustitutos Unicode sin pareja; tildes, eñes y pares sustitutos emoji válidos se conservan. `git diff --check` pasó. El workflow y los comandos se revisaron localmente; no hay parser YAML ni `actionlint` instalado, así que la sintaxis no recibió validación automatizada local. **Pendiente de evidencia remota:** ambos jobs de GitHub Actions deben terminar correctamente antes de declarar compatibles las imágenes 24.04/26.04; no se hizo push ni se abrió PR en esta fase.
+
+## v0.7 — Benchmarking & Storytelling (en desarrollo)
+
+- Convertir criterios de hook, progresión causal, función de plano, giro/cierre y claridad vertical en un protocolo reusable con evidencia por beat/corte, sin métricas de retención inventadas.
+- Separar metadatos reportados del piloto Gengar, inferencias y datos pendientes; sus 40.53 s, 1080×1920, 30 FPS y ~−14.4 LUFS no son objetivos universales.
+- Definir audio como reloj cuando hay grabación; anotar estimaciones, medidas y revisiones manuales sin afirmar sync palabra-a-palabra sin evidencia.
+- Añadir `narrative_timing` opcional a `schema_version: 1` para beats, pausas y cortes enlazados a escenas existentes; storyboards anteriores siguen válidos.
+- Incluir un ejemplo original de estación nocturna para demostrar el método; no generar imagen, audio o video.
+
+**Verificación local (2026-11-04):** suite completa, 93 pruebas ejecutadas; 91 aprobadas y 2 omitidas en Windows por permisos de symlink. `validate-skill.py`, cinco storyboards (cuatro previos y el ejemplo nuevo), las dos configuraciones del pipeline, ambos `dry-run` y `git diff --check` pasaron. La suite conserva los storyboards anteriores y cubre el bloque `narrative_timing` válido/inválido, referencias temporales, cortes de transición y voz que cruza un corte; prueba que las cuatro operaciones CLI siguen siendo de solo lectura. No se creó ni reprodujo audio/video; no hay evidencia audiovisual de ritmo, sync, continuidad temporal ni claridad real. **CI remoto y compatibilidad Ubuntu 24.04/26.04 pendientes.**
 
 ## Siguiente bloque — adaptadores de producción (futuro)
 

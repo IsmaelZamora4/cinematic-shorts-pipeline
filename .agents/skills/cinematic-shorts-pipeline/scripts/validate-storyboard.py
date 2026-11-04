@@ -280,6 +280,147 @@ def _reject_unpaired_surrogates(value):
             pending.extend(current)
 
 
+def _validate_narrative_timing(data):
+    if "narrative_timing" not in data:
+        return []
+    errors = []
+    block = data["narrative_timing"]
+    if not isinstance(block, dict):
+        return ["narrative_timing must be an object when provided"]
+    allowed_block_fields = {"clock_source", "anchors"}
+    for field in sorted(block.keys() - allowed_block_fields):
+        errors.append(f"narrative_timing contains unsupported field: {field}")
+
+    clock_source = block.get("clock_source")
+    if not isinstance(clock_source, str) or clock_source not in {"estimated", "recording"}:
+        errors.append("narrative_timing.clock_source must be 'estimated' or 'recording'")
+
+    voice = data.get("voiceover")
+    duration_ms = voice.get("duration_ms") if isinstance(voice, dict) else None
+    valid_duration = isinstance(duration_ms, int) and not isinstance(duration_ms, bool) and duration_ms > 0
+    if not valid_duration:
+        errors.append("narrative_timing requires a positive voiceover.duration_ms as its audio clock")
+
+    raw_scenes = data.get("scenes")
+    scene_order = raw_scenes if isinstance(raw_scenes, list) else []
+    scenes_by_id = {
+        scene["id"]: (index, scene) for index, scene in enumerate(scene_order)
+        if isinstance(scene, dict) and isinstance(scene.get("id"), str)
+    }
+    fps = data.get("fps")
+    valid_fps = isinstance(fps, int) and not isinstance(fps, bool) and fps > 0
+    frame_tolerance_ms = (1000 + fps - 1) // fps if valid_fps else None
+    anchors = block.get("anchors")
+    if not isinstance(anchors, list) or not anchors:
+        errors.append("narrative_timing.anchors must be a non-empty array")
+        return errors
+
+    allowed_anchor_fields = {"id", "scene_id", "kind", "start_ms", "end_ms", "basis"}
+    seen_ids = set()
+    previous_start = -1
+    previous_interval_end = -1
+    for index, anchor in enumerate(anchors):
+        label = f"narrative_timing.anchors[{index}]"
+        if not isinstance(anchor, dict):
+            errors.append(f"{label} must be an object")
+            continue
+        for field in sorted(anchor.keys() - allowed_anchor_fields):
+            errors.append(f"{label} contains unsupported field: {field}")
+
+        ident = anchor.get("id")
+        if not isinstance(ident, str) or not ident.strip():
+            errors.append(f"{label}.id must be a non-empty string")
+        elif ident in seen_ids:
+            errors.append(f"{label}.id duplicates {ident}")
+        else:
+            seen_ids.add(ident)
+
+        scene_id = anchor.get("scene_id")
+        if not isinstance(scene_id, str) or scene_id not in scenes_by_id:
+            errors.append(f"{label}.scene_id must reference an existing scene")
+            scene = None
+        else:
+            scene_index, scene = scenes_by_id[scene_id]
+
+        kind = anchor.get("kind")
+        if not isinstance(kind, str) or kind not in {"beat", "pause", "cut"}:
+            errors.append(f"{label}.kind must be 'beat', 'pause', or 'cut'")
+
+        basis = anchor.get("basis")
+        if not isinstance(basis, str) or basis not in {"estimated", "measured", "manually_reviewed"}:
+            errors.append(f"{label}.basis must be 'estimated', 'measured', or 'manually_reviewed'")
+        elif clock_source == "estimated" and basis != "estimated":
+            errors.append(f"{label}.basis must be estimated when clock_source is estimated")
+        elif clock_source == "recording" and basis == "estimated":
+            errors.append(f"{label}.basis must be measured or manually_reviewed when clock_source is recording")
+
+        start, end = anchor.get("start_ms"), anchor.get("end_ms")
+        valid_start = isinstance(start, int) and not isinstance(start, bool) and start >= 0
+        valid_end = isinstance(end, int) and not isinstance(end, bool) and end >= 0
+        if not valid_start:
+            errors.append(f"{label}.start_ms must be a non-negative integer")
+        if not valid_end:
+            errors.append(f"{label}.end_ms must be a non-negative integer")
+        if valid_start and valid_end:
+            if kind == "cut" and end != start:
+                errors.append(f"{label} cut must be a zero-duration time point")
+            elif kind in {"beat", "pause"} and end <= start:
+                errors.append(f"{label} {kind} must have positive duration")
+            if start < previous_start:
+                errors.append(f"{label}.start_ms must be chronological")
+            if kind != "cut" and start < previous_interval_end:
+                errors.append(f"{label} overlaps an earlier narrative timing anchor")
+            if valid_duration and end > duration_ms:
+                errors.append(f"{label}.end_ms exceeds voiceover.duration_ms")
+            previous_start = start
+            if kind != "cut":
+                previous_interval_end = max(previous_interval_end, end)
+
+            if scene is not None and valid_fps and frame_tolerance_ms is not None:
+                scene_start_frame = scene.get("start_frame")
+                scene_end_frame = scene.get("end_frame")
+                valid_scene_frames = (
+                    isinstance(scene_start_frame, int) and not isinstance(scene_start_frame, bool)
+                    and isinstance(scene_end_frame, int) and not isinstance(scene_end_frame, bool)
+                    and scene_start_frame >= 0 and scene_end_frame > scene_start_frame
+                )
+                if valid_scene_frames:
+                    if kind in {"beat", "pause"}:
+                        overlaps_scene = (
+                            (end + frame_tolerance_ms) * fps > scene_start_frame * 1000
+                            and (start - frame_tolerance_ms) * fps < scene_end_frame * 1000
+                        )
+                        if not overlaps_scene:
+                            errors.append(f"{label} timing does not overlap scene {scene_id} timing")
+                    elif kind == "cut":
+                        next_index = scene_index + 1
+                        has_next_scene = next_index < len(scene_order)
+                        next_scene = scene_order[next_index] if has_next_scene else None
+                        is_transition = (
+                            isinstance(next_scene, dict)
+                            and isinstance(next_scene.get("start_frame"), int)
+                            and not isinstance(next_scene.get("start_frame"), bool)
+                            and scene_end_frame == next_scene["start_frame"]
+                        )
+                        matches_boundary = (
+                            is_transition
+                            and abs(start * fps - scene_end_frame * 1000)
+                            <= frame_tolerance_ms * fps
+                        )
+                        if not matches_boundary:
+                            errors.append(
+                                f"{label} cut time must match a transition between scenes after {scene_id} "
+                                f"within one frame ({frame_tolerance_ms} ms)"
+                            )
+
+        if kind == "cut" and scene is not None:
+            cinematography = scene.get("cinematography")
+            transition = cinematography.get("transition_reason") if isinstance(cinematography, dict) else None
+            if not isinstance(transition, str) or not transition.strip():
+                errors.append(f"{label} cut requires scene {scene_id} cinematography.transition_reason")
+    return errors
+
+
 def parse_json(text):
     """Parse strict JSON with deterministic depth, key, number, and Unicode checks."""
     _check_json_nesting(text)
@@ -388,6 +529,8 @@ def validate(data):
                 errors.append("voiceover.duration_ms must be a positive integer")
             elif valid_fps and valid_total and duration_ms > total * 1000 / fps:
                 errors.append("voiceover.duration_ms exceeds storyboard duration")
+
+    errors.extend(_validate_narrative_timing(data))
 
     captions = data.get("captions", [])
     if not isinstance(captions, list):
