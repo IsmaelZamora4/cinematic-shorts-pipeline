@@ -120,6 +120,83 @@ class StoryboardValidationTests(unittest.TestCase):
         data["voiceover"]["duration_ms"] = True
         self.assertTrue(any("voiceover.duration_ms must" in error for error in story_validator.validate(data)))
 
+    def test_accepts_optional_audio_clock_anchors_with_timing_provenance(self):
+        data = json.loads(json.dumps(self.valid))
+        data["voiceover"]["duration_ms"] = 4000
+        data["narrative_timing"] = {
+            "clock_source": "recording",
+            "anchors": [
+                {"id": "hook", "scene_id": "entrada", "kind": "beat", "start_ms": 0, "end_ms": 1200, "basis": "measured"},
+                {"id": "breath", "scene_id": "entrada", "kind": "pause", "start_ms": 1200, "end_ms": 2000, "basis": "manually_reviewed"},
+                {"id": "reveal-cut", "scene_id": "entrada", "kind": "cut", "start_ms": 2000, "end_ms": 2000, "basis": "measured"},
+            ],
+        }
+        self.assertEqual([], story_validator.validate(data))
+
+    def test_rejects_invalid_audio_clock_anchor_contract(self):
+        data = json.loads(json.dumps(self.valid))
+        data["narrative_timing"] = {
+            "clock_source": "recording",
+            "word_alignment": "exact",
+            "anchors": [
+                {"id": "hook", "scene_id": "missing-scene", "kind": "beat", "start_ms": 0, "end_ms": 1200, "basis": "estimated"},
+                {"id": "reveal-cut", "scene_id": "decision", "kind": "cut", "start_ms": 1300, "end_ms": 1400, "basis": "measured"},
+                {"id": "late", "scene_id": "decision", "kind": "pause", "start_ms": 4200, "end_ms": 4300, "basis": "measured"},
+            ],
+        }
+        errors = story_validator.validate(data)
+        self.assertTrue(any("scene_id" in error for error in errors), errors)
+        self.assertTrue(any("basis" in error for error in errors), errors)
+        self.assertTrue(any("cut" in error for error in errors), errors)
+        self.assertTrue(any("voiceover.duration_ms" in error for error in errors), errors)
+        self.assertTrue(any("unsupported field: word_alignment" in error for error in errors), errors)
+
+    def test_audio_timing_anchor_must_overlap_referenced_scene(self):
+        data = json.loads(json.dumps(self.valid))
+        data["narrative_timing"] = {
+            "clock_source": "estimated",
+            "anchors": [
+                {"id": "misplaced-beat", "scene_id": "decision", "kind": "beat", "start_ms": 0, "end_ms": 500, "basis": "estimated"},
+            ],
+        }
+        errors = story_validator.validate(data)
+        self.assertTrue(any("timing does not overlap scene decision timing" in error for error in errors), errors)
+
+    def test_cut_anchor_must_match_an_outgoing_scene_transition(self):
+        data = json.loads(json.dumps(self.valid))
+        data["narrative_timing"] = {
+            "clock_source": "estimated",
+            "anchors": [
+                {"id": "early-cut", "scene_id": "entrada", "kind": "cut", "start_ms": 1000, "end_ms": 1000, "basis": "estimated"},
+            ],
+        }
+        errors = story_validator.validate(data)
+        self.assertTrue(any("cut time must match a transition between scenes" in error for error in errors), errors)
+
+    def test_cut_at_scene_boundary_allows_voice_beat_to_continue_across_cut(self):
+        data = json.loads(json.dumps(self.valid))
+        data["narrative_timing"] = {
+            "clock_source": "recording",
+            "anchors": [
+                {"id": "spoken-beat", "scene_id": "entrada", "kind": "beat", "start_ms": 1500, "end_ms": 2500, "basis": "measured"},
+                {"id": "picture-cut", "scene_id": "entrada", "kind": "cut", "start_ms": 1980, "end_ms": 1980, "basis": "manually_reviewed"},
+                {"id": "breath", "scene_id": "indicio", "kind": "pause", "start_ms": 2500, "end_ms": 2800, "basis": "measured"},
+            ],
+        }
+        self.assertEqual([], story_validator.validate(data))
+
+    def test_audio_clock_rejects_unexpected_json_types_without_crashing(self):
+        for field, value in (("clock_source", []), ("anchors", {})):
+            with self.subTest(field=field):
+                data = json.loads(json.dumps(self.valid))
+                data["narrative_timing"] = {
+                    "clock_source": "estimated",
+                    "anchors": [{"id": "hook", "scene_id": "entrada", "kind": "beat", "start_ms": 0, "end_ms": 1000, "basis": "estimated"}],
+                }
+                data["narrative_timing"][field] = value
+                errors = story_validator.validate(data)
+                self.assertTrue(any("narrative_timing" in error for error in errors), errors)
+
     def test_rejects_bad_caption_shape_order_and_bounds(self):
         data = json.loads(json.dumps(self.valid))
         data["captions"] = [

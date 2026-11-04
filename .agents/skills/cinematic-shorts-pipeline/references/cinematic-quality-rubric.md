@@ -16,7 +16,7 @@ Son hallazgos cualitativos para orientar plan y revisión; no métricas, medicio
 
 ## 1. Comprobaciones automáticas
 
-El validador puede probar sintaxis JSON, campos base, IDs, intervalos, duración, captions, `cinematography` y el bloque opcional `animation`: enums, tipos, offset beats contiguos/cobertura, estados de apoyo, root motion, mirada, manos y contacto declarado. Puede comprobar forma y rango, no si un rig existe o corresponde, si hay peso, apoyo, mirada o contacto convincente, ni si dos planos enlazan en movimiento.
+El validador puede probar sintaxis JSON, campos base, IDs, intervalos, duración, captions, `cinematography`, el bloque opcional `animation` y las anclas opcionales de `narrative_timing`: tipos, referencias a escenas, orden, límites de audio y procedencia declarada. Puede comprobar forma y rango, no si existe la grabación o si la ancla coincide con ella; tampoco si un rig existe o corresponde, si hay peso, apoyo, mirada o contacto convincente, ni si dos planos enlazan en movimiento.
 
 **Estado registrable:** pasa/falla con comando, archivo y error exacto. El paso estructural nunca aprueba cinematografía.
 
@@ -34,6 +34,8 @@ Inspecciona cada plano en el encuadre nativo 9:16 y tamaño de teléfono previst
 | Perspectiva/ángulo | Tamaño, ángulo y perspectiva sirven a escala/intención sin deformación accidental | Intención legible con distorsión o escala dudosa | Encuadre/ángulo cambia lectura sin motivo |
 | Información despejada | Rostro, manos, pista y acción que deben verse no quedan tapados | Interferencia leve | Elemento narrativo queda oculto |
 | Pose, mirada y props | Silueta, objetivo de mirada y relación espacial mano/prop son legibles | Intención entendible con obstrucción menor | Pose tapa acción, objetivo o contacto declarado |
+| Hook y premisa | Personaje/acción y pregunta central se entienden en la primera imagen o beat | Se entienden tras buscar una pista | El primer beat promete una premisa distinta o no presenta situación |
+| Función de plano | Acción y pista legibles; el encuadre sirve a su función narrativa | Se reconoce la función con esfuerzo | Plano repite, distrae o no contiene la información requerida |
 
 No otorgues nota numérica global. Cita qué píxeles/relación del cuadro sustentan el estado; “campo declarado” no es evidencia visual.
 
@@ -43,11 +45,13 @@ Requiere una secuencia reproducida, no storyboard ni stills. Evalúa y registra 
 
 - Eje y dirección de pantalla: entrada, salida, desplazamiento y mirada mantienen geografía; anota dónde se establece un cambio.
 - Movimiento de cámara: tiene disparador/destino legibles; velocidad y parada no compiten con acción.
-- Continuidad: gesto, luz, orientación y fase de acción enlazan; paneo o seguimiento no saltan.
+- Continuidad: el objetivo del personaje, fase de acción, mano/prop, estado de luz, mirada, orientación y eje enlazan en cada corte; paneo o seguimiento no saltan.
 - Actuación/mecánica: peso, anticipación, apoyos, root motion, mirada y manos tienen continuidad; contacto/agarre/liberación se sostiene y el prop responde según plan.
 - Rig/retarget: control de raíz, pies, mirada, manos y prop comprobados en el recurso exacto; registro de rig/asset y defectos de deformación. El script no valida compatibilidad.
 - Empalme entre planos: pose, equilibrio, dirección, mirada y estado mano/prop de salida coinciden con la entrada siguiente o tienen elipsis/cambio intencional documentado.
 - Ritmo del corte: información nueva llega antes de la siguiente toma y el cierre conserva intención.
+- Audio como reloj: compara cada ancla/corte con la grabación reproducida; revisa pausas, duración de frase y relación causal entre voz y visual. `measured` o `manually_reviewed` declarado en JSON no reemplaza escuchar y guardar evidencia.
+- Progresión: reproduce sin detener; registra si objetivo, obstáculo, pista, giro y cierre derivan uno del otro, si el público puede seguir la causa y si cada corte llega cuando cambia la información.
 
 Registra archivo reproducido, intervalo/corte, defectos y `comprobado`/`sin revisar`. Sin secuencia, estado temporal = `sin revisar`; no extrapoles a partir de una imagen.
 
@@ -64,6 +68,7 @@ Primera atención / acción / información:
 Fija (composición, jerarquía, perspectiva, luz, despeje): claro / parcial / falla / sin revisar + evidencia
 Temporal (eje, dirección, mirada, movimiento, continuidad, ritmo): comprobado / sin revisar + evidencia
 Actuación (rig, peso/apoyos, raíz, mirada, manos/prop, empalme): plan / still / secuencia + evidencia
+Voz/cortes (fuente de reloj, pausa, ancla, alineación comprobada): sin revisar / comprobado + método/evidencia
 Decisión/corrección:
 Bloqueo restante:
 ```

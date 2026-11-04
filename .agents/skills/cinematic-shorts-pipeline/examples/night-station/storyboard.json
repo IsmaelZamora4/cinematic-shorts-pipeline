@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "title": "La luz tras el sello",
+  "aspect_ratio": "9:16",
+  "fps": 30,
+  "total_frames": 360,
+  "logline": "Un guardia revisa una estación clausurada y sigue un farol encendido hasta una puerta sellada, donde una segunda luz responde desde dentro.",
+  "voiceover": {
+    "provider": "intercambiable; no seleccionado",
+    "duration_ms": 10800,
+    "timing_status": "estimated; replace with recording timing before production"
+  },
+  "narrative_timing": {
+    "clock_source": "estimated",
+    "anchors": [
+      {"id": "hook", "scene_id": "farol", "kind": "beat", "start_ms": 0, "end_ms": 1800, "basis": "estimated"},
+      {"id": "hook-pause", "scene_id": "farol", "kind": "pause", "start_ms": 1800, "end_ms": 3000, "basis": "estimated"},
+      {"id": "follow-cut", "scene_id": "farol", "kind": "cut", "start_ms": 3000, "end_ms": 3000, "basis": "estimated"},
+      {"id": "sealed-door-reveal", "scene_id": "huellas", "kind": "beat", "start_ms": 3000, "end_ms": 6600, "basis": "estimated"},
+      {"id": "reveal-pause", "scene_id": "huellas", "kind": "pause", "start_ms": 6600, "end_ms": 7000, "basis": "estimated"},
+      {"id": "answer-cut", "scene_id": "huellas", "kind": "cut", "start_ms": 7000, "end_ms": 7000, "basis": "estimated"},
+      {"id": "answer-and-choice", "scene_id": "respuesta", "kind": "beat", "start_ms": 7000, "end_ms": 10000, "basis": "estimated"},
+      {"id": "closing-pause", "scene_id": "respuesta", "kind": "pause", "start_ms": 10000, "end_ms": 10800, "basis": "estimated"}
+    ]
+  },
+  "captions": [
+    {"text": "La estación debía estar vacía.", "start_ms": 0, "end_ms": 1800},
+    {"text": "Pero el farol seguía tibio. Huellas mojadas llegaban a una puerta sellada.", "start_ms": 3000, "end_ms": 6600},
+    {"text": "La llama se apagó. Otra luz respondió desde dentro.", "start_ms": 7000, "end_ms": 10000}
+  ],
+  "scenes": [
+    {
+      "id": "farol",
+      "start_frame": 0,
+      "end_frame": 90,
+      "purpose": "Hook: contradecir visualmente que el andén clausurado está vacío.",
+      "action": "Un guardia adulto entra en el andén y se detiene al ver un farol encendido sobre un banco vacío.",
+      "framing": "Plano general vertical; silueta del guardia a la izquierda, farol reconocible en el tercio inferior derecho.",
+      "camera": "Plano fijo; permite que la entrada y el hallazgo organicen la lectura.",
+      "lighting": "Farol como luz cálida localizada; luz ambiente fría y tenue conserva la silueta del guardia.",
+      "cinematography": {
+        "subject_or_clue": "Farol encendido en el andén clausurado",
+        "shot_size": "wide",
+        "angle": "eye-level",
+        "focal_point": {"x": 0.67, "y": 0.64},
+        "continuity": {"axis_id": "guardia-puerta", "screen_direction": "left-to-right", "gaze_direction": "screen-right"},
+        "camera": {"intent": "Leer primero el farol y después reconocer quién lo descubre.", "movement": "Fija; cortar cuando el guardia oriente la mirada hacia el banco.", "lens_intent": "Perspectiva moderada que conserve profundidad del andén sin deformar figura ni banco."},
+        "narrative_light_source": "Farol práctico sobre el banco; rebote ambiente tenue del andén",
+        "visible_information": ["Andén sin pasajeros", "Guardia adulto", "Farol encendido y aislado"],
+        "transition_reason": "Cortar al detalle cuando el guardia se detiene y fija la mirada en el farol."
+      }
+    },
+    {
+      "id": "huellas",
+      "start_frame": 90,
+      "end_frame": 210,
+      "purpose": "La huella reciente y el sello intacto vuelven imposible una explicación inmediata.",
+      "action": "El guardia comprueba el calor del farol, sigue huellas mojadas y ve que terminan ante una puerta de servicio con sello exterior intacto.",
+      "framing": "Plano medio que relaciona mano, huellas y puerta; conservar el rostro en perfil y el sello sin obstrucción.",
+      "camera": "Desplazamiento corto motivado por la mirada desde el farol hasta el sello; detener antes de que el guardia lo tape.",
+      "lighting": "El farol ilumina mano y huellas cercanas; luz fría del andén mantiene legible el sello.",
+      "cinematography": {
+        "subject_or_clue": "Huellas mojadas que terminan en el sello intacto",
+        "shot_size": "medium",
+        "angle": "eye-level",
+        "focal_point": {"x": 0.66, "y": 0.46},
+        "continuity": {"axis_id": "guardia-puerta", "screen_direction": "left-to-right", "gaze_direction": "screen-right"},
+        "camera": {"intent": "Conectar comprobación, rastro y contradicción del sello en una lectura causal.", "movement": "Paneo breve de izquierda a derecha; frenar con el sello y el último paso en el mismo cuadro.", "lens_intent": "Perspectiva moderada; no exagerar distancia entre banco, huellas y puerta."},
+        "narrative_light_source": "Farol que el guardia lleva en la mano, con rebote ambiental del andén",
+        "visible_information": ["Mano siente calor del farol", "Huellas húmedas recientes", "Sello exterior continuo e intacto"],
+        "transition_reason": "Cortar después de leer el sello intacto a la puerta cuando la llama vacila."
+      }
+    },
+    {
+      "id": "respuesta",
+      "start_frame": 210,
+      "end_frame": 360,
+      "purpose": "Responder que hay otra presencia y cerrar con una decisión prudente, sin revelar quién está detrás.",
+      "action": "El farol se apaga; una luz fina aparece bajo la puerta. El guardia deja el farol apuntando a la rendija y retrocede un paso.",
+      "framing": "Plano medio bajo; rendija iluminada y silueta del guardia separadas y visibles en cuadro vertical.",
+      "camera": "Cámara estable; el cambio de luz produce la revelación y el retroceso del guardia cierra la acción.",
+      "lighting": "La luz del farol desaparece; una línea cálida bajo la puerta es la nueva fuente motivada.",
+      "cinematography": {
+        "subject_or_clue": "Luz que responde desde debajo de la puerta sellada",
+        "shot_size": "medium",
+        "angle": "low",
+        "focal_point": {"x": 0.61, "y": 0.73},
+        "continuity": {"axis_id": "guardia-puerta", "screen_direction": "left-to-right", "gaze_direction": "screen-right"},
+        "camera": {"intent": "Priorizar la luz inesperada y preservar la reacción/decisión del guardia.", "movement": "Fija durante el apagado y la respuesta; sostener el retroceso sin revelar el interior.", "lens_intent": "Perspectiva moderada; reservar espacio vertical para guardia, puerta y rendija."},
+        "narrative_light_source": "Luz cálida nueva que cruza bajo la puerta sellada",
+        "visible_information": ["Farol apagado", "Rendija responde con una luz distinta", "Guardia deja el farol orientado a la puerta y retrocede"],
+        "transition_reason": "Plano final; sostener la decisión y cortar antes de que se abra la puerta."
+      }
+    }
+  ]
+}
