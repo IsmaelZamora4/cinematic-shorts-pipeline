@@ -24,6 +24,22 @@ El punto focal se expresa como proporción aproximada del cuadro (`x`,`y`, orige
 | 2–4 s · `indicio` | Fibras del extremo cortado; mano detenida sirve de guía | La exploradora se para; paneo corto acompaña mirada y mano sin tocar la pista | Alguien cortó la cuerda recientemente; lugar no está tan vacío como parecía | La misma linterna acompaña la mirada; relleno conserva mano, cuerda y pared húmeda | Mismo eje; mano/mirada hacia derecha. Tras leer la pista, corte a su reacción y a la ruta que debe elegir. |
 | 4–6 s · `decision` | Giro/mirada hacia repisa; agua en la marca mantiene presión | La exploradora gira hacia la ruta y decide avanzar | Repisa ofrece ruta, pero el agua sigue alcanzando el sendero | La linterna sigue el giro; el haz revela repisa sin alumbrar el fondo completo | Mismo eje y mirada a derecha. Último plano: sostener la elección y terminar antes de mostrar el destino; no hay plano siguiente. |
 
+## Desglose de actuación por plano
+
+Offsets relativos al inicio del plano. Cada beat describe estado de entrada/salida y cubre todo el intervalo; “sostener” también es acción planificada. La raíz se describe por intención/dirección de pantalla, sin distancias ni coordenadas de mundo.
+
+| Plano / beats | Pose, anticipación y peso | Apoyos / root motion | Mirada | Manos y prop | Empalme |
+| --- | --- | --- | --- | --- | --- |
+| `entrada` 0–42 | Marcha cautelosa; cambiar peso antes del paso de frenado; torso desacelera sobre el pie de apoyo | Izquierdo sostiene mientras derecho oscila; raíz viaja hacia el interior | Línea de agua; termina mirando abajo | Sin acción de manos | Plano inicial; la trayectoria ya viene orientada al interior |
+| `entrada` 42–60 | Postura se asienta; sin anticipación nueva | Ambos pies plantados; raíz estacionaria | Sube de la línea de agua hacia la cuerda a pantalla derecha | Sin acción de manos | Sale equilibrada; `indicio` recibe la misma mirada |
+| `indicio` 0–26 | Ojos llegan antes que cabeza; torso orienta hacia el hallazgo | Ambos pies plantados; raíz estacionaria | Fibras cortadas, a pantalla derecha | Manos recogidas | Recibe mirada del plano anterior; prepara alcance sin mover base |
+| `indicio` 26–60 | Mano izquierda alcanza y frena antes de tocar; peso permanece sobre la base | Dos pies plantados; raíz estacionaria | Mantiene foco en el corte | Interacción `approach`; cuerda no se mueve, no hay contacto | Sale con mano cerca y mirada fija; plano siguiente levanta la cabeza sin invertir eje |
+| `decision` 0–20 | Mirada sale primero de la cuerda; giro del cuerpo sobre una base estable | Pie derecho sostiene, izquierdo libera el giro; raíz hace giro en sitio | Repisa a pantalla derecha | Mano se retira antes del contacto; no hay estado `release` porque nunca agarró la cuerda | Recibe mirada/mano del plano anterior; conserva eje |
+| `decision` 20–45 | Cargar apoyo antes de avanzar; torso acompaña el paso | Izquierdo sostiene, derecho oscila; raíz viaja hacia el interior | Borde de la repisa | Sin acción de manos | Paso continúa el giro, sin salto de pose |
+| `decision` 45–60 | Completar transferencia y sostener decisión | Ambos pies plantados; raíz estacionaria | Mantiene destino fuera de alcance | Sin acción de manos | Plano final; sin toma siguiente |
+
+**Rig:** `unselected` en los tres planos. Requisito conceptual: bípedo adulto con controles de raíz, mirada, pies IK, manos IK y contacto de prop. Sin nombres de hueso, archivo, licencia ni compatibilidad afirmados; se verifican con el recurso exacto en un bloque posterior.
+
 ## Problemas del primer planteamiento y decisiones
 
 - **Negro amplio sin lectura:** plano 1 podía dejar figura pequeña rodeada de roca oscura. **Decisión:** primer foco sobre agua iluminada; mantener sendero y silueta legibles, reservar negro al túnel que funciona como destino incierto.
@@ -32,13 +48,17 @@ El punto focal se expresa como proporción aproximada del cuadro (`x`,`y`, orige
 - **Luz sin motivación comprobable:** la frase “rebote tenue” no ubicaba su causa. **Decisión:** linterna se mantiene fuente principal; nombrar pared próxima como origen del rebote y verificarlo en still si se autoriza producción.
 - **Jerarquía 9:16 incierta:** la composición anterior solo decía “vertical”. **Decisión:** reservar primer término/lower frame para la pista o agua, espacio medio para acción y fondo para ruta; revisar cara, mano, pista y zona de interfaz en el encuadre final.
 - **Continuidad solo general:** no había relación de eje reutilizable ni dirección asignada. **Decisión:** repetir `axis_id`, declarar avance y mirada a la derecha; cambio de lado requeriría giro o plano neutral visible.
+- **Movimiento de personaje sin fase:** “entra” no aclaraba apoyo, transferencia ni parada. **Decisión:** dividir en viaje y asentamiento con offsets relativos, pies declarados y root motion coherente con el eje.
+- **Alcance podía confundirse con contacto:** se mencionaba mano y cuerda sin estado físico. **Decisión:** usar `approach`, detener antes de tocar y declarar respuesta inmóvil de la cuerda; el plano final retira la mano en estado `none`, no `release`.
+- **Sin continuidad de pose entre cortes:** no se indicaban estados recibidos/entregados. **Decisión:** registrar mirada, equilibrio, pies y mano en entrada/salida por plano; el script valida la ficha individual, la continuidad perceptual sigue siendo humana/temporal.
 
 ## Estado de revisión
 
 - **Automático:** estructura y cronología susceptibles de validación por script; sin afirmar aprobación cinematográfica.
+- **Animación automática:** el contrato valida campos, enums y cobertura contigua de beats relativa al plano; no comprueba rigs, peso, contacto o naturalidad.
 - **Intención escrita:** cada plano identifica primera atención, acción, revelación, fuente de luz y corte siguiente; plano final declara cierre sin siguiente toma.
 - **Fotograma fijo:** sin revisar; no hay imágenes.
-- **Secuencia:** sin revisar; no hay reproducción. Movimiento de cámara, eje percibido, exposición, legibilidad móvil y continuidad visual no están probados.
+- **Secuencia:** sin revisar; no hay reproducción. Movimiento de cámara, eje percibido, exposición, lectura móvil, apoyo, peso, raíz, mirada, contacto y continuidad de actuación no están probados.
 
 ## Plan técnico acotado
 

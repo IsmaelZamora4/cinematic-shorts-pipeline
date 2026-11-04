@@ -12,10 +12,20 @@ SHOT_SIZES = {"extreme-wide", "wide", "full", "medium", "close-up", "extreme-clo
 CAMERA_ANGLES = {"eye-level", "low", "high", "overhead", "dutch"}
 SCREEN_DIRECTIONS = {"left-to-right", "right-to-left", "toward-camera", "away-from-camera", "static"}
 GAZE_DIRECTIONS = {"screen-left", "screen-right", "up", "down", "toward-camera", "away-from-camera", "on-subject", "none"}
+RIG_STATUSES = {"unselected", "unverified", "verified"}
+RIG_CONTROLS = {"root", "gaze", "foot_ik", "hand_ik", "prop_contact"}
+ROOT_MOTION_MODES = {"stationary", "in-place-turn", "travel", "combined"}
+FOOT_STATES = {"planted", "support", "swing", "airborne", "offscreen", "not-applicable"}
+HAND_SIDES = {"left", "right", "both"}
+HAND_CONTACT_STATES = {"none", "approach", "touch", "grasp", "release", "maintain"}
 
 
 def _non_empty_string(value):
     return isinstance(value, str) and bool(value.strip())
+
+
+def _is_enum(value, choices):
+    return isinstance(value, str) and value in choices
 
 
 def _validate_cinematography(data, label):
@@ -26,9 +36,9 @@ def _validate_cinematography(data, label):
     for field in ("subject_or_clue", "narrative_light_source", "transition_reason"):
         if not _non_empty_string(data.get(field)):
             errors.append(f"{label}.cinematography.{field} must be a non-empty string")
-    if data.get("shot_size") not in SHOT_SIZES:
+    if not _is_enum(data.get("shot_size"), SHOT_SIZES):
         errors.append(f"{label}.cinematography.shot_size must be a supported shot size")
-    if data.get("angle") not in CAMERA_ANGLES:
+    if not _is_enum(data.get("angle"), CAMERA_ANGLES):
         errors.append(f"{label}.cinematography.angle must be a supported camera angle")
 
     focal_point = data.get("focal_point")
@@ -51,9 +61,9 @@ def _validate_cinematography(data, label):
     else:
         if not _non_empty_string(continuity.get("axis_id")):
             errors.append(f"{label}.cinematography.continuity.axis_id must be a non-empty string")
-        if continuity.get("screen_direction") not in SCREEN_DIRECTIONS:
+        if not _is_enum(continuity.get("screen_direction"), SCREEN_DIRECTIONS):
             errors.append(f"{label}.cinematography.continuity.screen_direction is unsupported")
-        if continuity.get("gaze_direction") not in GAZE_DIRECTIONS:
+        if not _is_enum(continuity.get("gaze_direction"), GAZE_DIRECTIONS):
             errors.append(f"{label}.cinematography.continuity.gaze_direction is unsupported")
 
     camera = data.get("camera")
@@ -71,6 +81,144 @@ def _validate_cinematography(data, label):
         or any(not _non_empty_string(item) for item in visible)
     ):
         errors.append(f"{label}.cinematography.visible_information must be a non-empty array of strings")
+    return errors
+
+
+def _validate_animation(data, label, scene_duration):
+    errors = []
+    prefix = f"{label}.animation"
+    if not isinstance(data, dict):
+        return [f"{prefix} must be an object when provided"]
+
+    rig = data.get("rig")
+    if not isinstance(rig, dict):
+        errors.append(f"{prefix}.rig must be an object")
+    else:
+        if not _is_enum(rig.get("status"), RIG_STATUSES):
+            errors.append(f"{prefix}.rig.status is unsupported")
+        if not _non_empty_string(rig.get("profile")):
+            errors.append(f"{prefix}.rig.profile must be a non-empty string")
+        controls = rig.get("required_controls")
+        valid_controls = (
+            isinstance(controls, list)
+            and bool(controls)
+            and all(_is_enum(control, RIG_CONTROLS) for control in controls)
+        )
+        if not valid_controls or len(set(controls)) != len(controls) or "root" not in controls:
+            errors.append(f"{prefix}.rig.required_controls must be unique supported controls including root")
+
+    continuity = data.get("continuity")
+    if not isinstance(continuity, dict):
+        errors.append(f"{prefix}.continuity must be an object")
+    else:
+        for field in ("incoming", "outgoing"):
+            if not _non_empty_string(continuity.get(field)):
+                errors.append(f"{prefix}.continuity.{field} must be a non-empty string")
+
+    beats = data.get("beats")
+    if not isinstance(beats, list) or not beats:
+        errors.append(f"{prefix}.beats must be a non-empty array")
+        return errors
+
+    expected_start = 0
+    for index, beat in enumerate(beats):
+        beat_prefix = f"{prefix}.beats[{index}]"
+        if not isinstance(beat, dict):
+            errors.append(f"{beat_prefix} must be an object")
+            continue
+        start, end = beat.get("start_offset"), beat.get("end_offset")
+        valid_start = isinstance(start, int) and not isinstance(start, bool) and start >= 0
+        valid_end = isinstance(end, int) and not isinstance(end, bool) and end > 0
+        if not valid_start:
+            errors.append(f"{beat_prefix}.start_offset must be a non-negative integer")
+        if not valid_end:
+            errors.append(f"{beat_prefix}.end_offset must be a positive integer")
+        if valid_start and valid_end:
+            if end <= start:
+                errors.append(f"{beat_prefix} must have positive duration")
+            if start != expected_start:
+                errors.append(f"{beat_prefix}.start_offset must be contiguous at {expected_start}")
+            if end > scene_duration:
+                errors.append(f"{beat_prefix}.end_offset exceeds scene duration")
+            expected_start = end
+
+        for field in ("action", "pose_in", "pose_out", "anticipation", "weight_intent"):
+            if not _non_empty_string(beat.get(field)):
+                errors.append(f"{beat_prefix}.{field} must be a non-empty string")
+
+        root_motion = beat.get("root_motion")
+        if not isinstance(root_motion, dict):
+            errors.append(f"{beat_prefix}.root_motion must be an object")
+        else:
+            mode = root_motion.get("mode")
+            direction = root_motion.get("screen_direction")
+            valid_mode = _is_enum(mode, ROOT_MOTION_MODES)
+            if not valid_mode:
+                errors.append(f"{beat_prefix}.root_motion.mode is unsupported")
+            valid_direction = _is_enum(direction, SCREEN_DIRECTIONS)
+            if not valid_direction:
+                errors.append(f"{beat_prefix}.root_motion.screen_direction is unsupported")
+            elif valid_mode and mode in {"stationary", "in-place-turn"} and direction != "static":
+                errors.append(f"{beat_prefix}.root_motion.screen_direction must be static for {mode}")
+            elif valid_mode and mode in {"travel", "combined"} and direction == "static":
+                errors.append(f"{beat_prefix}.root_motion.screen_direction must indicate travel for {mode}")
+            if not _non_empty_string(root_motion.get("intent")):
+                errors.append(f"{beat_prefix}.root_motion.intent must be a non-empty string")
+
+        support = beat.get("support")
+        if not isinstance(support, dict):
+            errors.append(f"{beat_prefix}.support must be an object")
+        else:
+            for foot in ("left_foot", "right_foot"):
+                if not _is_enum(support.get(foot), FOOT_STATES):
+                    errors.append(f"{beat_prefix}.support.{foot} is unsupported")
+            if not _non_empty_string(support.get("weight_transfer")):
+                errors.append(f"{beat_prefix}.support.weight_transfer must be a non-empty string")
+
+        gaze = beat.get("gaze")
+        if not isinstance(gaze, dict):
+            errors.append(f"{beat_prefix}.gaze must be an object")
+        else:
+            if not _non_empty_string(gaze.get("target")):
+                errors.append(f"{beat_prefix}.gaze.target must be a non-empty string")
+            for direction in ("direction_in", "direction_out"):
+                if not _is_enum(gaze.get(direction), GAZE_DIRECTIONS):
+                    errors.append(f"{beat_prefix}.gaze.{direction} is unsupported")
+
+        hands = beat.get("hands")
+        if not isinstance(hands, list):
+            errors.append(f"{beat_prefix}.hands must be an array")
+        else:
+            for hand_index, hand in enumerate(hands):
+                hand_prefix = f"{beat_prefix}.hands[{hand_index}]"
+                if not isinstance(hand, dict):
+                    errors.append(f"{hand_prefix} must be an object")
+                    continue
+                if not _is_enum(hand.get("side"), HAND_SIDES):
+                    errors.append(f"{hand_prefix}.side is unsupported")
+                for field in ("intent", "target"):
+                    if not _non_empty_string(hand.get(field)):
+                        errors.append(f"{hand_prefix}.{field} must be a non-empty string")
+                if not _is_enum(hand.get("contact_state"), HAND_CONTACT_STATES):
+                    errors.append(f"{hand_prefix}.contact_state is unsupported")
+
+        interaction = beat.get("prop_interaction")
+        if interaction is not None:
+            if not isinstance(interaction, dict):
+                errors.append(f"{beat_prefix}.prop_interaction must be an object when provided")
+            else:
+                if not _non_empty_string(interaction.get("prop")):
+                    errors.append(f"{beat_prefix}.prop_interaction.prop must be a non-empty string")
+                if not _is_enum(interaction.get("hand"), HAND_SIDES):
+                    errors.append(f"{beat_prefix}.prop_interaction.hand is unsupported")
+                for field in ("action", "prop_response"):
+                    if not _non_empty_string(interaction.get(field)):
+                        errors.append(f"{beat_prefix}.prop_interaction.{field} must be a non-empty string")
+                if not _is_enum(interaction.get("contact_state"), HAND_CONTACT_STATES - {"none"}):
+                    errors.append(f"{beat_prefix}.prop_interaction.contact_state is unsupported")
+
+    if expected_start != scene_duration:
+        errors.append(f"{prefix}.beats end at {expected_start}; expected scene duration {scene_duration}")
     return errors
 
 
@@ -163,6 +311,8 @@ def validate(data):
                 errors.append(f"{label}.{key} must be a non-empty string")
         if "cinematography" in scene:
             errors.extend(_validate_cinematography(scene["cinematography"], label))
+        if "animation" in scene and valid_start and valid_end and end > start:
+            errors.extend(_validate_animation(scene["animation"], label, end - start))
     if valid_total and scenes and expected_start != total:
         errors.append(f"scene timeline ends at {expected_start}; total_frames is {total}")
 

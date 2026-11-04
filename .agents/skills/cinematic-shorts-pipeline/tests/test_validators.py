@@ -24,6 +24,48 @@ class StoryboardValidationTests(unittest.TestCase):
     def setUp(self):
         self.valid = json.loads((ROOT / "examples" / "cave-exploration" / "storyboard.json").read_text(encoding="utf-8"))
 
+    def valid_animation(self):
+        return {
+            "rig": {
+                "status": "unselected",
+                "profile": "Adult biped with root, gaze, feet, and hand controls.",
+                "required_controls": ["root", "gaze", "foot_ik", "hand_ik", "prop_contact"],
+            },
+            "beats": [
+                {
+                    "start_offset": 0,
+                    "end_offset": 30,
+                    "action": "Approach the wet trail and decelerate.",
+                    "pose_in": "Cautious upright walk.",
+                    "pose_out": "Upper body settles above the planted feet.",
+                    "anticipation": "Short weight shift before stopping.",
+                    "weight_intent": "Transfer weight into the leading planted foot.",
+                    "root_motion": {"mode": "travel", "screen_direction": "toward-camera", "intent": "Advance a short distance along the trail."},
+                    "support": {"left_foot": "support", "right_foot": "swing", "weight_transfer": "Left foot carries weight as right foot clears the ground."},
+                    "gaze": {"target": "Waterline", "direction_in": "away-from-camera", "direction_out": "down"},
+                    "hands": [],
+                },
+                {
+                    "start_offset": 30,
+                    "end_offset": 60,
+                    "action": "Settle, then reach toward the rope without pulling it.",
+                    "pose_in": "Stopped with weight over both feet.",
+                    "pose_out": "Hand held just short of the rope.",
+                    "anticipation": "Gaze arrives before the reaching hand.",
+                    "weight_intent": "Keep the pelvis balanced over the planted stance.",
+                    "root_motion": {"mode": "stationary", "screen_direction": "static", "intent": "No root displacement while inspecting the rope."},
+                    "support": {"left_foot": "planted", "right_foot": "planted", "weight_transfer": "Small shift toward the reaching side; both soles stay planted."},
+                    "gaze": {"target": "Cut rope fibers", "direction_in": "down", "direction_out": "screen-right"},
+                    "hands": [{"side": "left", "intent": "Reach without touching yet.", "target": "Rope end", "contact_state": "approach"}],
+                    "prop_interaction": {"prop": "Rope", "hand": "left", "action": "Reach and stop short.", "contact_state": "approach", "prop_response": "Rope remains still; no contact yet."},
+                },
+            ],
+            "continuity": {
+                "incoming": "Begins already moving inward from the previous establishing beat.",
+                "outgoing": "Ends balanced and looking screen-right toward the rope close-up.",
+            },
+        }
+
     def test_all_simulation_storyboards_are_valid(self):
         paths = sorted((ROOT / "examples").glob("*/storyboard.json"))
         paths.append(ROOT / "templates" / "storyboard.json")
@@ -214,6 +256,50 @@ class StoryboardValidationTests(unittest.TestCase):
         self.assertTrue(any("axis_id" in error for error in errors))
         self.assertTrue(any("screen_direction" in error for error in errors))
         self.assertTrue(any("visible_information" in error for error in errors))
+
+    def test_accepts_optional_animation_contract_with_rig_support_and_prop_contact(self):
+        data = json.loads(json.dumps(self.valid))
+        data["scenes"][0]["animation"] = self.valid_animation()
+        self.assertEqual([], story_validator.validate(data))
+
+    def test_rejects_animation_gaps_and_offsets_outside_scene(self):
+        data = json.loads(json.dumps(self.valid))
+        animation = self.valid_animation()
+        animation["beats"][1]["start_offset"] = 31
+        animation["beats"][1]["end_offset"] = 61
+        data["scenes"][0]["animation"] = animation
+        errors = story_validator.validate(data)
+        self.assertTrue(any("contiguous" in error for error in errors))
+        self.assertTrue(any("scene duration" in error for error in errors))
+
+    def test_rejects_root_motion_direction_conflicting_with_mode(self):
+        data = json.loads(json.dumps(self.valid))
+        animation = self.valid_animation()
+        animation["beats"][0]["root_motion"] = {
+            "mode": "travel",
+            "screen_direction": "static",
+            "intent": "Move forward.",
+        }
+        data["scenes"][0]["animation"] = animation
+        errors = story_validator.validate(data)
+        self.assertTrue(any("must indicate travel for travel" in error for error in errors))
+
+    def test_rejects_invalid_animation_rig_root_support_and_gaze_fields(self):
+        data = json.loads(json.dumps(self.valid))
+        animation = self.valid_animation()
+        animation["rig"]["status"] = []
+        animation["rig"]["required_controls"] = ["root", {"unknown": "control"}]
+        animation["beats"][0]["root_motion"]["mode"] = ["teleport"]
+        animation["beats"][0]["support"]["left_foot"] = {"state": "floating"}
+        animation["beats"][0]["gaze"]["direction_out"] = ["behind-the-camera-left"]
+        animation["beats"][1]["prop_interaction"]["hand"] = {"side": "third-hand"}
+        data["scenes"][0]["animation"] = animation
+        errors = story_validator.validate(data)
+        self.assertTrue(any("required_controls" in error for error in errors))
+        self.assertTrue(any("root_motion.mode" in error for error in errors))
+        self.assertTrue(any("left_foot" in error for error in errors))
+        self.assertTrue(any("gaze.direction_out" in error for error in errors))
+        self.assertTrue(any("prop_interaction.hand" in error for error in errors))
 
     def test_cli_reports_invalid_encoding_without_traceback(self):
         with tempfile.TemporaryDirectory() as temp:
