@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate skill files, frontmatter, local Markdown links, and JSON resources."""
+"""Validate skill files, Markdown links, storyboards, and local pipeline contracts."""
 import argparse
 import importlib.util
 import json
@@ -15,7 +15,9 @@ REQUIRED = [
     "references/remotion-integration.md", "references/voice-and-captions.md",
     "references/quality-control.md", "references/cinematic-quality-rubric.md",
     "scripts/validate-skill.py", "scripts/validate-storyboard.py",
+    "scripts/pipeline.py",
     "templates/storyboard.json", "templates/scene-config.json", "templates/render-config.json",
+    "templates/pipeline.json",
     "tests/test_validators.py", "docs/sources.md", "docs/skill-candidates.md",
     "docs/lessons-learned.md", "docs/prompt-library.md", "docs/roadmap.md",
     "docs/simulation.md", "docs/benchmark-plan.md", "docs/codex-discovery.md",
@@ -23,6 +25,8 @@ REQUIRED = [
     "examples/forest-storm/plan.md", "examples/forest-storm/storyboard.json",
     "examples/abandoned-research-station/plan.md",
     "examples/abandoned-research-station/storyboard.json",
+    "examples/cave-exploration/pipeline.json", "tests/test_pipeline.py",
+    "references/pipeline-orchestration.md",
 ]
 LINK = re.compile(r'!?\[[^\]]*\]\((<[^>]+>|[^)\s]+)(?:\s+"[^"]*")?\)')
 REFERENCE_DEFINITION = re.compile(
@@ -40,6 +44,11 @@ _storyboard_spec = importlib.util.spec_from_file_location(
 )
 STORYBOARD_VALIDATOR = importlib.util.module_from_spec(_storyboard_spec)
 _storyboard_spec.loader.exec_module(STORYBOARD_VALIDATOR)
+_pipeline_spec = importlib.util.spec_from_file_location(
+    "pipeline_validator", Path(__file__).with_name("pipeline.py")
+)
+PIPELINE_VALIDATOR = importlib.util.module_from_spec(_pipeline_spec)
+_pipeline_spec.loader.exec_module(PIPELINE_VALIDATOR)
 
 
 def validate_frontmatter(folder_name: str, text: str):
@@ -175,6 +184,17 @@ def validate_storyboards(root: Path):
     return errors
 
 
+def validate_pipeline_configs(root: Path):
+    errors = []
+    root = root.resolve()
+    paths = sorted(root.rglob("pipeline.json"))
+    for path in paths:
+        relative = path.relative_to(root)
+        _, pipeline_errors, _, _ = PIPELINE_VALIDATOR.load_and_validate_config(path)
+        errors.extend(f"pipeline validation failed in {relative}: {error}" for error in pipeline_errors)
+    return errors
+
+
 def validate(root: Path):
     errors = []
     root = root.resolve()
@@ -190,6 +210,7 @@ def validate(root: Path):
     errors.extend(validate_markdown_links(root))
     errors.extend(validate_json_files(root))
     errors.extend(validate_storyboards(root))
+    errors.extend(validate_pipeline_configs(root))
     return errors
 
 
@@ -203,7 +224,7 @@ def main():
         for error in errors:
             print(f"- {error}")
         return 1
-    print("PASS: required files, frontmatter, Markdown links, strict JSON, and example/template storyboards")
+    print("PASS: required files, frontmatter, Markdown links, strict JSON, storyboards, and pipeline configs")
     return 0
 
 

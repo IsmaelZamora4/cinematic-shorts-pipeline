@@ -4,7 +4,7 @@ Estados: **implementada** = existe aquí; **candidata** = fuente identificada, n
 
 | Candidato | Estado | Encaje y siguiente comprobación |
 | --- | --- | --- |
-| `cinematic-shorts-pipeline` | Implementada, v0.4 | Planificación cinematográfica y contrato opcional de animación 3D por beats en storyboard v1; validación de forma/tiempos y rúbrica separada de plan/still/secuencia. Selector confirmado desde la raíz. |
+| `cinematic-shorts-pipeline` | Implementada, v0.5 | Contratos de planificación cinematográfica/animación en storyboard v1 y pipeline v1; planificador local sin ejecución audiovisual, validación de DAG/manifiestos y rúbrica separada de plan/still/secuencia. Selector confirmado desde la raíz. |
 | Skills Remotion instaladas (`remotion-best-practices`, markup, captions, Studio, render) | Disponibles y referenciadas | Consultarlas solo al implementar con Remotion. Versión del proyecto auditado: 4.0.540; volver a comprobar. |
 | `claude-animated-shorts` | Fuente candidata | MIT según metadatos de GitHub; estilo distinto y empaquetado específico de Claude. No copiarla completa; revisar licencias por archivo antes de usar referencias incluidas. |
 | VoiceStudio | Fuente candidata | AGPL-3.0 según metadatos de GitHub. Sin integración probada; calidad en español, hardware, términos de modelos y distribución sin verificar. |

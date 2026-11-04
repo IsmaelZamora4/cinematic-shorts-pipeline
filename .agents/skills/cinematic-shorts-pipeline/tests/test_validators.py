@@ -408,6 +408,15 @@ class SkillValidationTests(unittest.TestCase):
             errors = skill_validator.validate_json_files(root)
         self.assertTrue(any("duplicate JSON key" in error for error in errors))
 
+    def test_skill_validator_checks_pipeline_configs_semantically(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = root / "examples" / "bad" / "pipeline.json"
+            path.parent.mkdir(parents=True)
+            path.write_text('{"pipeline_version": 1}', encoding="utf-8")
+            errors = skill_validator.validate_pipeline_configs(root)
+        self.assertTrue(any("missing required field: project" in error for error in errors))
+
     def test_skill_validator_reports_missing_required_files(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "sample-skill"

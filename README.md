@@ -12,11 +12,15 @@ Python estándar; sin dependencias nuevas.
 
 ```powershell
 python -B .agents/skills/cinematic-shorts-pipeline/scripts/validate-skill.py .agents/skills/cinematic-shorts-pipeline
+python -B .agents/skills/cinematic-shorts-pipeline/scripts/pipeline.py validate .agents/skills/cinematic-shorts-pipeline/examples/cave-exploration/pipeline.json
+python -B .agents/skills/cinematic-shorts-pipeline/scripts/pipeline.py dry-run .agents/skills/cinematic-shorts-pipeline/examples/cave-exploration/pipeline.json
 python -B .agents/skills/cinematic-shorts-pipeline/scripts/validate-storyboard.py .agents/skills/cinematic-shorts-pipeline/examples/cave-exploration/storyboard.json
 python -B .agents/skills/cinematic-shorts-pipeline/scripts/validate-storyboard.py .agents/skills/cinematic-shorts-pipeline/examples/forest-storm/storyboard.json
 python -B .agents/skills/cinematic-shorts-pipeline/scripts/validate-storyboard.py .agents/skills/cinematic-shorts-pipeline/examples/abandoned-research-station/storyboard.json
 python -B -m unittest discover -s .agents/skills/cinematic-shorts-pipeline/tests -v
 ```
+
+`pipeline.py` valida contratos pipeline v1, muestra el DAG con `plan`/`dry-run` y valida manifiestos existentes con `validate-manifest`. Planificar no ejecuta etapas ni crea artefactos. Consulta [la referencia de orquestación](.agents/skills/cinematic-shorts-pipeline/references/pipeline-orchestration.md) para el contrato, rutas seguras y política de reanudación.
 
 `validate-skill.py` comprueba estructura y cronología de los tres storyboards de `examples/` y `templates/storyboard.json`, además de sintaxis JSON y enlaces Markdown. Los captions no pueden solaparse salvo excepción intencional documentada con `overlap_exception`.
 
