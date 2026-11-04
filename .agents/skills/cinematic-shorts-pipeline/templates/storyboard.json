@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "title": "Working title",
+  "aspect_ratio": "9:16",
+  "fps": 30,
+  "total_frames": 180,
+  "logline": "An explorer seeks a way out before a rising underground stream cuts off the return.",
+  "voiceover": {
+    "provider": "local or selected provider",
+    "duration_ms": 4200,
+    "timing_status": "estimated"
+  },
+  "captions": [
+    {"text": "Example caption", "start_ms": 500, "end_ms": 1300}
+  ],
+  "scenes": [
+    {
+      "id": "shot-01",
+      "start_frame": 0,
+      "end_frame": 60,
+      "purpose": "Establish isolation and direction.",
+      "action": "Explorer enters an uneven limestone chamber and stops at a fork.",
+      "framing": "Vertical wide shot; full figure occupies a small part of the lower third.",
+      "camera": "Slow waist-height push-in; moderate perspective.",
+      "lighting": "Controlled headlamp beam with faint warm bounce; retain shadow detail.",
+      "cinematography": {
+        "subject_or_clue": "Explorer and cave entrance",
+        "shot_size": "wide",
+        "angle": "eye-level",
+        "focal_point": {"x": 0.5, "y": 0.62},
+        "continuity": {
+          "axis_id": "explorer-to-cave-interior",
+          "screen_direction": "away-from-camera",
+          "gaze_direction": "away-from-camera"
+        },
+        "camera": {
+          "intent": "Establish the explorer's scale and route into the cave.",
+          "movement": "Slow push-in along the entrance axis; stop before the fork.",
+          "lens_intent": "Moderate perspective; preserve body proportions and cave depth."
+        },
+        "narrative_light_source": "Explorer's headlamp",
+        "visible_information": ["Explorer silhouette", "Cave fork", "Trail direction"],
+        "transition_reason": "Cut to the fork when the headlamp reaches it."
+      }
+    },
+    {
+      "id": "shot-02",
+      "start_frame": 60,
+      "end_frame": 120,
+      "purpose": "Reveal a recent human trace.",
+      "action": "A fresh rope end hangs above the rising waterline; explorer notices it.",
+      "framing": "Over-shoulder medium; rope remains unobstructed.",
+      "camera": "Short motivated pan from the explorer's gaze to the rope.",
+      "lighting": "Headlamp picks out the rope while soft fill preserves the rock surface."
+    },
+    {
+      "id": "shot-03",
+      "start_frame": 120,
+      "end_frame": 180,
+      "purpose": "End on a choice and unresolved danger.",
+      "action": "Explorer turns toward a narrow ledge as water reaches the trail marker.",
+      "framing": "Medium profile with the ledge and waterline both legible.",
+      "camera": "Locked frame; let the actor's turn carry the beat.",
+      "lighting": "Headlamp tracks the ledge; no decorative emissive accents."
+    }
+  ]
+}

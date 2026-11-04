@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "engine": "remotion-r3f | blender | hybrid",
+  "frame_size": {"width": 1080, "height": 1920},
+  "fps": 30,
+  "asset_policy": "local-first; verify license and rig before use",
+  "scene": {
+    "environment": "describe geometry, scale and variation",
+    "character": "describe silhouette, equipment and rig evidence",
+    "animation": "describe source, action, continuity and foot contact",
+    "camera": "describe framing, lens intent and motion",
+    "lighting": "describe motivated key, fill and shadow budget"
+  }
+}

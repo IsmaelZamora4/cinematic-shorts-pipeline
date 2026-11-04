@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "title": "La puerta bajo la roca",
+  "aspect_ratio": "9:16",
+  "fps": 30,
+  "total_frames": 450,
+  "logline": "Una exploradora descubre una puerta metálica oculta en una cueva y oye tres golpes desde el otro lado.",
+  "captions": [],
+  "scenes": [
+    {
+      "id": "exploracion",
+      "start_frame": 0,
+      "end_frame": 90,
+      "purpose": "Establecer escala, geografía y acción sin desperdiciar el cuadro en oscuridad vacía.",
+      "action": "La exploradora sigue una cuerda de retorno por una cámara irregular; su linterna recorre roca, suelo y una pared parcialmente cubierta por sedimento.",
+      "framing": "Plano general vertical; figura adulta completa en tercio inferior y pared de interés visible al fondo.",
+      "camera": "Avance lento y estable a altura de cintura; perspectiva moderada.",
+      "lighting": "Haz de linterna práctico como luz principal; rebote ambiental tenue conserva textura y silueta en sombras."
+    },
+    {
+      "id": "indicio",
+      "start_frame": 90,
+      "end_frame": 180,
+      "purpose": "Comunicar con claridad qué observa la protagonista y señalar una forma artificial.",
+      "action": "El haz encuentra una línea recta y dos remaches bajo polvo; la exploradora se detiene y orienta la mirada y la mano hacia la seam.",
+      "framing": "Plano medio sobre el hombro; rostro de perfil, mano y línea metálica comparten el cuadro.",
+      "camera": "Paneo corto motivado desde la mirada hasta la seam; termina quieto sobre el indicio.",
+      "lighting": "La linterna revela la línea y el borde del guante; relleno bajo evita que el rostro desaparezca."
+    },
+    {
+      "id": "revelacion",
+      "start_frame": 180,
+      "end_frame": 270,
+      "purpose": "Hacer inequívoco el descubrimiento de la puerta oculta.",
+      "action": "La exploradora limpia una franja de sedimento y aparecen una placa metálica vertical, bisagra oxidada y marco encajado en la roca.",
+      "framing": "Plano medio frontal de tres cuartos; mano y puerta ocupan el centro, con roca alrededor como contexto.",
+      "camera": "Desplazamiento lateral pequeño que descubre el ancho de la puerta sin perder a la exploradora.",
+      "lighting": "Haz rasante motivado por la linterna; brillo controlado en metal mate, sombras con detalle."
+    },
+    {
+      "id": "cierre",
+      "start_frame": 270,
+      "end_frame": 360,
+      "purpose": "Mostrar el mecanismo sellado y preparar el giro sonoro.",
+      "action": "Con dos dedos, la exploradora sigue un cierre circular cubierto de óxido; al tocarlo, llegan tres golpes sordos desde detrás de la puerta.",
+      "framing": "Detalle con mano, cierre y una parte reconocible del marco; no aislar el prop del contexto.",
+      "camera": "Acercamiento muy lento que se detiene antes del primer golpe.",
+      "lighting": "Linterna sostenida sobre el cierre; reflejo tenue en los nudillos, sin luz decorativa."
+    },
+    {
+      "id": "respuesta",
+      "start_frame": 360,
+      "end_frame": 450,
+      "purpose": "Cerrar con reacción y una pregunta abierta; no revelar qué hay detrás.",
+      "action": "La exploradora retira la mano y retrocede medio paso; polvo cae desde la junta inferior después del último golpe. La puerta permanece cerrada.",
+      "framing": "Plano medio vertical que conserva rostro, puerta completa y junta inferior en una jerarquía clara.",
+      "camera": "Plano fijo; la reacción del cuerpo y el polvo llevan el cierre.",
+      "lighting": "Haz permanece entre la exploradora y la junta; el fondo de cueva sigue tenue pero legible."
+    }
+  ]
+}

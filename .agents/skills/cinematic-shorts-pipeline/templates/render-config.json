@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "profile": "preview",
+  "width": 540,
+  "height": 960,
+  "fps": 30,
+  "codec": "choose supported codec after environment check",
+  "concurrency": 1,
+  "output_directory": "output",
+  "authorization": "render only after explicit request",
+  "quality_checks": ["review every shot still", "measure memory and render time", "verify audio and captions"]
+}

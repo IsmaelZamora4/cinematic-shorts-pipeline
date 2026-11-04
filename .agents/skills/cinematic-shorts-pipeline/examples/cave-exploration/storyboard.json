@@ -1,0 +1,106 @@
+{
+  "schema_version": 1,
+  "title": "La cuerda que termina",
+  "aspect_ratio": "9:16",
+  "fps": 30,
+  "total_frames": 180,
+  "logline": "Una exploradora busca una salida antes de que el agua creciente cierre el regreso y encuentra una cuerda recién cortada.",
+  "voiceover": {
+    "provider": "Kokoro local (propuesta; sin generar audio)",
+    "duration_ms": 4200,
+    "timing_status": "estimated; verify against recording before production"
+  },
+  "captions": [
+    {"text": "El agua no estaba aquí ayer.", "start_ms": 350, "end_ms": 1450},
+    {"text": "La cuerda acaba de romperse.", "start_ms": 2200, "end_ms": 3450}
+  ],
+  "scenes": [
+    {
+      "id": "entrada",
+      "start_frame": 0,
+      "end_frame": 60,
+      "purpose": "Establecer escala, aislamiento y peligro ambiental.",
+      "action": "Una exploradora adulta entra en una cámara irregular; agua nueva cubre parte del sendero.",
+      "framing": "Plano general vertical desde atrás; figura completa pequeña contra la roca.",
+      "camera": "Desplazamiento lento a altura de cintura, perspectiva moderada.",
+      "lighting": "Haz cálido de linterna frontal controlado y rebote tenue; negros con detalle.",
+      "cinematography": {
+        "subject_or_clue": "Haz de linterna sobre la línea de agua",
+        "shot_size": "wide",
+        "angle": "eye-level",
+        "focal_point": {"x": 0.58, "y": 0.66},
+        "continuity": {
+          "axis_id": "exploradora-hacia-interior",
+          "screen_direction": "away-from-camera",
+          "gaze_direction": "away-from-camera"
+        },
+        "camera": {
+          "intent": "Establecer ruta, escala y agua nueva antes de buscar la cuerda.",
+          "movement": "Avance lento detrás de la exploradora; parar cuando la linterna alcance el sendero mojado.",
+          "lens_intent": "Perspectiva moderada; conservar figura adulta y profundidad de la cámara."
+        },
+        "narrative_light_source": "Linterna frontal de la exploradora",
+        "visible_information": ["Exploradora completa", "Línea de agua sobre el sendero", "Ruta hacia el interior"],
+        "transition_reason": "Cortar cuando el haz se desplaza hacia la cuerda, preservando el eje hacia el interior."
+      }
+    },
+    {
+      "id": "indicio",
+      "start_frame": 60,
+      "end_frame": 120,
+      "purpose": "Revelar evidencia concreta de otra persona y cambiar la lectura del lugar.",
+      "action": "La exploradora se detiene; una cuerda recién cortada cuelga sobre la línea húmeda de la roca.",
+      "framing": "Plano medio sobre el hombro; mano y cuerda legibles, sin que el personaje tape el corte.",
+      "camera": "Paneo corto motivado por la mirada y desaceleración al llegar al detalle.",
+      "lighting": "La linterna ilumina fibras y roca próxima; relleno suave conserva silueta.",
+      "cinematography": {
+        "subject_or_clue": "Extremo cortado de la cuerda",
+        "shot_size": "medium",
+        "angle": "eye-level",
+        "focal_point": {"x": 0.67, "y": 0.43},
+        "continuity": {
+          "axis_id": "exploradora-hacia-interior",
+          "screen_direction": "left-to-right",
+          "gaze_direction": "screen-right"
+        },
+        "camera": {
+          "intent": "Conectar la mirada con evidencia concreta de otra presencia.",
+          "movement": "Paneo corto de izquierda a derecha desde el perfil/mano hasta el corte; detener al quedar la fibra nítida en composición.",
+          "lens_intent": "Perspectiva moderada; mantener mano y cuerda sin distorsión de borde."
+        },
+        "narrative_light_source": "Linterna frontal orientada por la mirada de la exploradora",
+        "visible_information": ["Cuerda cortada y fibras", "Mano detenida antes de tocarla", "Superficie húmeda detrás"],
+        "transition_reason": "Cortar después de leer el corte a la reacción de la exploradora; mantener la mirada hacia pantalla derecha."
+      }
+    },
+    {
+      "id": "decision",
+      "start_frame": 120,
+      "end_frame": 180,
+      "purpose": "Cerrar con decisión activa y amenaza sin resolver.",
+      "action": "La exploradora mira una repisa estrecha cuando el agua alcanza una marca del sendero.",
+      "framing": "Perfil medio; repisa, personaje y nivel del agua permanecen visibles.",
+      "camera": "Plano estable; la mirada y el giro llevan el cierre.",
+      "lighting": "Haz sigue la repisa; luz ambiental discreta, sin cristales decorativos emisivos.",
+      "cinematography": {
+        "subject_or_clue": "Mirada de la exploradora hacia la repisa mientras el agua toca la marca",
+        "shot_size": "medium",
+        "angle": "eye-level",
+        "focal_point": {"x": 0.62, "y": 0.48},
+        "continuity": {
+          "axis_id": "exploradora-hacia-interior",
+          "screen_direction": "left-to-right",
+          "gaze_direction": "screen-right"
+        },
+        "camera": {
+          "intent": "Hacer legibles la decisión, la ruta estrecha y la presión del agua en un solo cuadro.",
+          "movement": "Cámara fija; dejar que el giro de cabeza y el haz conduzcan desde la exploradora hacia la repisa.",
+          "lens_intent": "Perspectiva moderada; incluir personaje, repisa y marca sin alejar el foco."
+        },
+        "narrative_light_source": "Linterna frontal que sigue el giro hacia la repisa",
+        "visible_information": ["Giro de decisión", "Repisa como ruta posible", "Agua alcanzando la marca del sendero"],
+        "transition_reason": "Plano final; sostener un instante la elección y terminar antes de revelar el destino."
+      }
+    }
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "title": "El refugio del tronco",
+  "aspect_ratio": "9:16",
+  "fps": 30,
+  "total_frames": 180,
+  "logline": "Durante una tormenta, una excursionista encuentra refugio cuando un rayo revela una cornisa junto al sendero bloqueado.",
+  "voiceover": {
+    "provider": "sin seleccionar; no se generó voz",
+    "duration_ms": 4600,
+    "timing_status": "estimado para simulación"
+  },
+  "captions": [
+    {"text": "El sendero desapareció con la lluvia.", "start_ms": 350, "end_ms": 1500},
+    {"text": "El relámpago mostró un refugio.", "start_ms": 2300, "end_ms": 3500}
+  ],
+  "scenes": [
+    {
+      "id": "sendero",
+      "start_frame": 0,
+      "end_frame": 60,
+      "purpose": "Establecer poca visibilidad y presión del clima.",
+      "action": "Excursionista se inclina contra ráfaga; la ruta se pierde entre árboles mojados.",
+      "framing": "Plano general vertical con figura adulta y profundidad entre troncos.",
+      "camera": "Seguimiento lateral lento a altura del pecho, movimiento contenido.",
+      "lighting": "Ambiente frío tenue; lámpara frontal práctica deja visible el rostro y el suelo próximo."
+    },
+    {
+      "id": "bloqueo",
+      "start_frame": 60,
+      "end_frame": 120,
+      "purpose": "Convertir el clima en obstáculo físico y revelar una opción.",
+      "action": "Un árbol caído bloquea el paso; un destello breve revela una cornisa bajo roca cercana.",
+      "framing": "Plano medio amplio; tronco, excursionista y cornisa compiten con jerarquía clara.",
+      "camera": "Freno de cámara y reencuadre corto hacia la mirada.",
+      "lighting": "Destello motivado, corto y sin quemar; rebote frío conserva detalle en tronco y rostro."
+    },
+    {
+      "id": "refugio",
+      "start_frame": 120,
+      "end_frame": 180,
+      "purpose": "Cerrar la acción con una protección inmediata pero provisional.",
+      "action": "La excursionista cruza al hueco bajo la cornisa y se cubre cuando vuelve la lluvia fuerte.",
+      "framing": "Plano medio lateral con entrada, figura y límite de lluvia visibles.",
+      "camera": "Plano estable; la acción del personaje lleva el cierre.",
+      "lighting": "Luz ambiente fría; lámpara práctica ilumina el hueco sin volverlo una fuente mágica."
+    }
+  ]
+}
