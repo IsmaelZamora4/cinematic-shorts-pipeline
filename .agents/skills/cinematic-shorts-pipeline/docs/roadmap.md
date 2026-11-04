@@ -50,7 +50,7 @@
 
 **Verificación local (2026-11-04):** 87 pruebas ejecutadas en Python 3.12 y 3.13; 85 aprobadas y 2 omitidas porque este entorno Windows no permite crear symlinks. `validate-skill.py`, los cuatro storyboards, las dos configuraciones del pipeline y ambos `dry-run` pasaron. `validate-manifest` y la garantía de solo lectura de las cuatro operaciones CLI se cubrieron en la suite. Se fija un máximo explícito de 128 niveles JSON y se rechazan sustitutos Unicode sin pareja; tildes, eñes y pares sustitutos emoji válidos se conservan. `git diff --check` pasó. El workflow y los comandos se revisaron localmente; no hay parser YAML ni `actionlint` instalado, así que la sintaxis no recibió validación automatizada local. **Pendiente de evidencia remota:** ambos jobs de GitHub Actions deben terminar correctamente antes de declarar compatibles las imágenes 24.04/26.04; no se hizo push ni se abrió PR en esta fase.
 
-## v0.7 — Benchmarking & Storytelling (en desarrollo)
+## v0.7 — Benchmarking & Storytelling (integrada en `main` mediante PR #4)
 
 - Convertir criterios de hook, progresión causal, función de plano, giro/cierre y claridad vertical en un protocolo reusable con evidencia por beat/corte, sin métricas de retención inventadas.
 - Separar metadatos reportados del piloto Gengar, inferencias y datos pendientes; sus 40.53 s, 1080×1920, 30 FPS y ~−14.4 LUFS no son objetivos universales.
@@ -58,7 +58,7 @@
 - Añadir `narrative_timing` opcional a `schema_version: 1` para beats, pausas y cortes enlazados a escenas existentes; storyboards anteriores siguen válidos.
 - Incluir un ejemplo original de estación nocturna para demostrar el método; no generar imagen, audio o video.
 
-**Verificación local (2026-11-04):** suite completa, 93 pruebas ejecutadas; 91 aprobadas y 2 omitidas en Windows por permisos de symlink. `validate-skill.py`, cinco storyboards (cuatro previos y el ejemplo nuevo), las dos configuraciones del pipeline, ambos `dry-run` y `git diff --check` pasaron. La suite conserva los storyboards anteriores y cubre el bloque `narrative_timing` válido/inválido, referencias temporales, cortes de transición y voz que cruza un corte; prueba que las cuatro operaciones CLI siguen siendo de solo lectura. No se creó ni reprodujo audio/video; no hay evidencia audiovisual de ritmo, sync, continuidad temporal ni claridad real. **CI remoto y compatibilidad Ubuntu 24.04/26.04 pendientes.**
+**Verificación local y CI (2026-11-04):** localmente se ejecutaron 93 pruebas; 91 aprobadas y 2 omitidas en Windows por permisos de symlink. `validate-skill.py`, los cuatro storyboards de `examples/` y la plantilla, las dos configuraciones del pipeline, ambos `dry-run` y `git diff --check` pasaron. La suite conserva los storyboards anteriores y cubre el bloque `narrative_timing` válido/inválido, referencias temporales, cortes de transición y voz que cruza un corte; prueba que las cuatro operaciones CLI siguen siendo de solo lectura. GitHub Actions ejecutó las 93 pruebas sin omisiones ni fallos en Ubuntu 24.04 y 26.04 para el commit `69cb9c8134a8703a48d249fa6823b2a504b1a3d8` (run [41921199387](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/actions/runs/41921199387)); el squash integrado en `main` es `530188cc37c570939b58e5dfbc64190afb7df0f7`. No se creó ni reprodujo audio/video; no hay evidencia audiovisual de ritmo, sync, continuidad temporal ni claridad real.
 
 ## Siguiente bloque — adaptadores de producción (futuro)
 
