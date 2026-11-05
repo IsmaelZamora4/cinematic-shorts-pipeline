@@ -1,10 +1,10 @@
 # Phase 4A — Diseño aprobado y evidencia de Phase 4B
 
-**Estado:** Phase 4B implementada, revisada y validada con una inferencia local real; PR #12 abierto; Phase 4C pendiente
+**Estado:** Phase 4B implementada, revisada, validada localmente y fusionada mediante PR #12; Phase 4C documental iniciada en PR #13
 **Fecha:** 2026-11-05
 **Código comprobado:** commit 5541f19315487721606499c4c2af8a2611e7a473
 **Rama de diseño:** design/productive-tts-execution-v0.10
-**PR #12:** mantener abierto; CI multiplataforma confirmado tras las correcciones de auditoría
+**PR #12:** fusionado mediante merge commit `aba0b4335062655291488b2ec128ee05922aff16`; CI multiplataforma confirmado tras las correcciones de auditoría
 
 ## Decisiones aprobadas antes de Phase 4B
 
@@ -275,7 +275,7 @@ Pruebas unitarias/integración local con procesos worker sustituidos por fakes. 
 | Cross-platform | POSIX symlink tests; Windows junction y reparse tests; symlink omitido solo con WinError 1314 documentado |
 | Sin retries | timeout/error invokes worker una vez, no reintenta ni reutiliza manifiestos/output de corridas anteriores |
 
-Verificación automatizada Phase 4B: suite unittest local, 176 pruebas aprobadas y 3 skips por permisos de symlink en Windows; validate-skill.py, validación/dry-run, cuatro storyboards y git diff --check pasan. La segunda revisión de código corrigió los cuatro hallazgos; CI del PR #12 pasó en Ubuntu 24.04, Ubuntu 26.04 y Windows 2025. Esa evidencia de CI corresponde a pruebas con mocks; no ejecuta inferencia real.
+Verificación automatizada Phase 4B: suite unittest local ejecutó 176 pruebas; 173 aprobadas y 3 omitidas por permisos de symlink en Windows. validate-skill.py, validación/dry-run, cuatro storyboards y git diff --check pasaron. La segunda revisión de código corrigió los cuatro hallazgos; CI del PR #12 pasó en Ubuntu 24.04, Ubuntu 26.04 y Windows 2025. Esa evidencia de CI corresponde a pruebas con mocks; no ejecuta inferencia real.
 
 ### Validación local real (2026-11-05)
 
@@ -304,7 +304,7 @@ Artefactos creados solo en el proyecto temporal: `.pipeline/work/validated-plan.
 - scripts/pipeline.py: elegibilidad Kokoro, dependencia productiva exclusiva, pseudoentrada pipeline-config, validated-plan determinista y semánticamente revalidado, SHA-256 WAV post-write, provenance diferenciada, mensaje dry-run read-only correcto, publicación exclusiva y checkpoints manifest v1.
 - tests/test_productive_tts_execution.py: éxito, fallos, WAV PCM alterado con métricas iguales, recibo alterado con hashes recalculados, dependencias extra, estados audiovisuales, dry-run read-only, cambios concurrentes y recuperación sin resume.
 - scripts/tts-kokoro-worker.py: reutilizado sin cambios; la síntesis mantiene un único worker.
-- Regresión local Windows: 176 pruebas; 3 skips por permisos de symlink. CI multiplataforma tras correcciones: PASS. La ejecución local real documentada arriba complementa —no sustituye— las pruebas con mocks.
+- Regresión local Windows: 176 pruebas ejecutadas; 173 aprobadas y 3 skips por permisos de symlink. CI multiplataforma tras correcciones: PASS. La ejecución local real documentada arriba complementa —no sustituye— las pruebas con mocks.
 
 ### Phase 4C — documentación y gates
 
@@ -345,6 +345,6 @@ Phase 4B conserva estos gates de aceptación; se verificaron en CI, y la ejecuci
 
 ## Recomendación
 
-Decisiones de pseudentrada pipeline-config y provenance/versiones aprobadas. Phase 4B implementa dos etapas, publicación sin overwrite, un intento, cero retries y cero resume. Recomendación: mantener PR #12 abierto hasta revisar esta evidencia y fusionar solo con aprobación explícita. No iniciar Phase 4C todavía. Mantener explícita la frontera standalone/productiva y los assets no incluidos.
+Decisiones de pseudentrada pipeline-config y provenance/versiones aprobadas. Phase 4B implementa dos etapas, publicación sin overwrite, un intento, cero retries y cero resume; quedó integrada en `main` mediante PR #12. Phase 4C documenta el estado y límites de v0.10, sin ampliar la ejecución audiovisual. PR #13 contiene esos cambios y permanece abierto para aprobación final. Mantener explícita la frontera standalone/productiva y los assets no incluidos.
 
-El diseño se contrastó con pipeline.py, el worker y los contratos heredados antes de implementar. Phase 4B conserva pipeline_version=1 y manifest_version=1. Phase 4C sigue pendiente; su alcance documentado permanece separado de esta validación local.
+El diseño se contrastó con pipeline.py, el worker y los contratos heredados antes de implementar. Phase 4B conserva pipeline_version=1 y manifest_version=1. Phase 4C ya comenzó como fase documental de release readiness v0.10; no implementa Blender, Remotion, FFmpeg ni etapas audiovisuales.

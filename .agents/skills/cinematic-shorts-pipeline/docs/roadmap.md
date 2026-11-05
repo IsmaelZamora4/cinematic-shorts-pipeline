@@ -91,12 +91,9 @@
 
 **Estado:** PR #8 fusionado mediante squash `bfd71cc0ac7cbf969768a4b40e80c2661738026f`. La matriz de GitHub Actions en Ubuntu 24.04, Ubuntu 26.04 y Windows 2025 aprobó. En Windows 11/Python 3.12, las pruebas de junction y detección genérica de reparse pasaron; los casos de symlink que requieren privilegios se omitieron explícitamente con `WinError 1314`. La fase publica únicamente artefactos simulados y no integra TTS productivo al DAG.
 
-## Siguiente bloque — adaptadores productivos (futuro)
+## Plan anterior a las fases productivas (histórico)
 
-1. Verificar versiones locales, procedencia del modelo, licencia y requisitos del proveedor antes de implementar o declarar disponibilidad.
-2. Integrar el piloto local de Kokoro al DAG productivo solo tras revisar la publicación segura y autorizar esa integración.
-3. Añadir persistencia, recuperación e invalidación de descendientes en fases separadas; no añadir reintentos implícitos.
-4. Resolver rig/asset exacto y validar poses, apoyos, root motion, mirada, manos/props y continuidad en una secuencia autorizada.
+El plan original proponía integrar el piloto Kokoro al DAG con persistencia/huellas antes de los adaptadores audiovisuales. La integración TTS quedó implementada en Phase 4B (v0.10). No se implementaron Blender, Remotion, FFmpeg ni QA audiovisual; cualquier asset/modelo y licencia se debe verificar antes de una fase futura.
 
 ## v0.9 — Phase 3B.2: Kokoro Local Integration
 
@@ -108,6 +105,31 @@
 
 **Fuera de alcance:** integración del worker en el DAG productivo, escritura en outputs declarados, Piper, otras voces/idiomas, remuestreo, límites de CPU/RAM/VRAM, aislamiento de red, reintentos y recuperación.
 
-## Pendiente de implementación
+## v0.10 y estado actual
 
-No hay ejecutor integrado al DAG ni adaptador productivo formalmente implementado; `run-tts-kokoro` sigue siendo una ejecución local independiente. Tampoco hay motor de render, alineador de subtítulos, descargador de assets, verificador legal automático ni QA audiovisual temporal. Los documentos de benchmark y rúbrica son protocolos, no resultados medidos.
+### v0.10 — Phase 4: Productive local TTS
+
+#### Phase 4A — diseño de ejecución (completada)
+
+- Aprobada la pseudentrada semántica `pipeline-config` para Stage 01; algoritmo de fingerprints y contratos `pipeline_version: 1` / `manifest_version: 1` preservados.
+- Aprobado registro estructurado de versiones runtime observadas y SHA-256 del worker, modelo y voces; `availability: verified` no reemplaza la comprobación del worker.
+- Definidos elegibilidad Kokoro, recibo `validated-plan`, checkpoints y fronteras de publicación/fallo.
+
+#### Phase 4B — ejecución productiva v0.10 (completada)
+
+- `run-productive-tts` implementa Stage 01 y Stage 03 Kokoro mediante worker existente. Publica y relee validated-plan, WAV, provenance y manifest v1; solo Stage 01/03 pueden completarse. Outputs no se sobrescriben.
+- Un intento; sin retries, resume ni adopción de artefactos huérfanos. 02/04/05/06 permanecen pending.
+- Aprobada auditoría/correcciones; PR #12 fusionado mediante merge commit `aba0b4335062655291488b2ec128ee05922aff16`.
+- 176 pruebas automatizadas ejecutadas localmente: 173 aprobadas y 3 skips por permisos de symlink Windows (`WinError 1314`). CI del head PR `cb323a0e419ee1a16912890a6e778b49afb89929` pasó en Ubuntu 24.04, Ubuntu 26.04 y Windows 2025. CI usa mocks y no hace inferencia real.
+- Una inferencia Kokoro real, solo en Windows local; no se hizo inferencia real en Ubuntu. Runtime, versiones, hashes y tiempos en [evidencia de Phase 4B](productive-tts-execution-design.md).
+
+#### Phase 4C — Documentation & Release Readiness v0.10
+
+- Actualizar orquestación, seguridad, instrucciones de skill, README y roadmap para describir contratos/controles reales de Phase 4B.
+- Corregir afirmaciones históricas que describían TTS productivo como no implementado.
+- Mantener esta fase documental: sin cambios de código, audiovisual, runtime, assets ni generación de medios.
+- La fase actualiza la documentación de v0.10; no cambia el estado de los adaptadores audiovisuales ni afirma generación completa de video.
+
+### Trabajo todavía pendiente
+
+El runner productivo actual solo cubre Stage 01/03 Kokoro. No existe ejecución Blender para escenas, Remotion para composición, FFmpeg para finalizar video, QA audiovisual, alineador de subtítulos, descargador/verificador de licencias, retries, resume ni orquestación audiovisual general. La rúbrica y benchmarks siguen siendo protocolos, no resultados medidos. La generación completa de cortos verticales no está implementada.
