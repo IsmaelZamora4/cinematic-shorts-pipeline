@@ -37,17 +37,35 @@ La auditoría se realizó sobre `scripts/pipeline.py`, `scripts/tts-kokoro-worke
 
 ### MVP de evidencia y tamaño
 
-El primer gate local debe crear **una escena original**, un movimiento de cámara visible y una composición 9:16 a **540×960**, con duración muy corta y revisión humana de still/secuencia aparte. Propuesta para acotar la primera prueba: hasta 2 segundos, 12 FPS y 24 PNG totales; un máximo inicial de 512 MiB comprimidos y 1 GiB al extraer. Son topes de diseño sujetos a revisión; no son mediciones de rendimiento ni metas de calidad. Si el hardware no termina dentro del timeout acordado, reducir frames/calidad antes que elevar límites sin evidencia.
+El MVP queda fijado en una escena original: storyboard `schema_version: 1`, `aspect_ratio: "9:16"`, `fps: 12`, `total_frames: 24`, escena con `[start_frame, end_frame) = [0, 24)`; el perfil del pipeline debe coincidir exactamente con ancho 540, alto 960 y 12 FPS. Duración nominal: `24 / 12 = 2` segundos. El renderer produce exactamente 24 PNG, uno por frame fuente `0..23`.
 
-El MVP usa geometría original simple descrita declarativamente, sin descarga ni recursos 3D externos. Así verifica generación, cámara, iluminación, render y transferencia sin confundirlo con compatibilidad de rigs o licencias de assets. La futura admisión de assets existentes necesita su propio formato allowlist, inventario de licencia y pruebas de rutas.
+Se recomienda **Cycles con dispositivo CPU** como ruta inicial. Su ventaja para el primer MVP es que el dispositivo de render no depende de GPU, backend gráfico, VRAM disponible ni contexto GPU de Windows/headless. Es una ruta disponible en Windows y en ejecución background según el modelo de dispositivos documentado por Blender; la compatibilidad concreta de la instalación debe verificarse durante la futura prueba real. Riesgo: el i3-10F puede tardar considerablemente; no hay benchmark todavía y no se promete duración de render. La escena mínima, resolución, muestras y timeout se fijan antes del gate; si no termina, reducir muestras o geometría en una revisión aprobada, no cambiar de backend automáticamente. “Reproducible” aquí significa inputs, engine, dispositivo, seed y parámetros fijados y registrados; no promete pixeles/hash idénticos entre versiones de Blender o CPUs distintas.
+
+Eevee se descarta para este MVP CPU. Es rasterizado GPU-only: su uso headless en un Windows sin contexto gráfico soportado no es admisible como ruta inicial; además depende de driver/OpenGL y consumo de VRAM, y Windows puede terminar operaciones GPU largas. Reevaluarlo solo con requisito verificable de GPU/driver/contexto y una prueba real específica. Referencias: [limitaciones Eevee 5.2](https://docs.blender.org/manual/en/5.2/render/eevee/limitations/limitations.html), [dispositivo de render Cycles 5.2](https://docs.blender.org/manual/en/5.2/render/cycles/render_settings/index.html), [requisitos de GPU Cycles](https://docs.blender.org/manual/en/5.2/render/cycles/gpu_rendering.html).
+
+El primer gate local guarda un `.blend` editable y los 24 PNG verificados, separados de una revisión humana visual. Un tope inicial propuesto de 512 MiB comprimidos y 1 GiB descomprimidos limita publicación/lectura, no rendimiento ni memoria del proceso Blender. Los límites de frames/dimensiones evitan que el perfil solicite cargas superiores al MVP.
+
+El MVP usa geometría original simple declarada en JSON, sin descarga ni recursos 3D externos. Así verifica generación, cámara, iluminación, render y transferencia sin confundirlo con compatibilidad de rigs o licencias de assets. La futura admisión de assets existentes necesita su propio formato allowlist, inventario de licencia y pruebas de rutas.
 
 ## 3. Decisión arquitectónica recomendada
 
 ### Runner compartido con ejecutor Stage 02 separado
 
-Extender el orquestador existente mediante un perfil de ejecución nuevo y explícito, que reutilice su validación, DAG, fingerprints, manifiesto v1, checkpoints y publicación. Mantener la implementación Blender en un worker fijo separado y acotado (`blender-scenes-worker.py`), parecido en responsabilidad al worker Kokoro. No añadir un runner Blender que cree otro manifiesto o replique Stage 01; tampoco introducir un scheduler general.
+Extender el orquestador existente mediante un runner productivo separado y explícito para Stage 02, reutilizando validación, DAG, fingerprints, manifiesto v1, checkpoints y publicación. Blender se invoca por worker fijo del repositorio (`blender-scenes-worker.py`); no se crea un segundo manifiesto ni se replica Stage 01.
 
-La primera implementación tras aprobar este diseño debe agregar elegibilidad y una ruta productiva Stage 02 sin cambiar el comportamiento/CLI/validaciones del comando `run-productive-tts`. Para ejecución combinada, preferir después un comando neutral de ejecución productiva que comparta helpers de Stage 01 y manifiesto, conservando `run-productive-tts` como alias/contrato Phase 4B compatible. Los detalles de CLI quedan por decidir en Phase 5B y requieren pruebas de regresión explícitas.
+**CLI aprobada para Phase 5B:**
+
+```text
+run-productive-scenes CONFIG --blender ABSOLUTE_PATH
+```
+
+Este comando ejecuta Stage 01 y luego Stage 02. Stage 03, 04, 05 y 06 permanecen `pending`. La ruta debe ser absoluta y existente; no se busca en PATH, no se instala Blender. El perfil TTS de Phase 4B continúa usando `run-productive-tts`; ese comando conserva su contrato Stage 01 + Stage 03 y rechaza Stage 02 productiva. No se diseña aún un comando combinado.
+
+Responsabilidades con fuente de verdad única:
+
+- **Proceso padre (`pipeline.py`):** valida config/storyboard/inputs, crea y verifica `validated-plan`, calcula todos los fingerprints y hashes, establece el manifiesto/checkpoints, crea staging exclusivo y request JSON acotado, arma argv fijo, lanza/termina Blender, confirma que inputs no cambiaron, construye `package.json`/`provenance.json`/ZIP desde resultados, valida el ZIP sin extraer, calcula SHA-256 final, publica sin overwrite y actualiza/verifica el único manifiesto.
+- **Blender + worker fijo:** lee solo el request previamente validado, construye el `.blend` y renderiza PNG dentro del staging indicado por el padre. Devuelve por stdout un recibo de runtime observado y nombres/rangos producidos. No calcula hashes autoritativos, no empaqueta ZIP, no publica, no actualiza manifiesto ni decide estados.
+- **Verificador en proceso padre:** único responsable de validar inventario, hashes, PNG, runtime y provenance; una etapa se completa solo después de reread/hash del ZIP publicado y checkpoint durable del manifiesto.
 
 La composición de DAG objetivo queda así:
 
@@ -74,15 +92,30 @@ En una ejecución Stage 02 aislada, el manifiesto puede tener Stage 01 y Stage 0
 
 ### Recurso de especificación para el MVP
 
-Añadir por código una allowlist/schema cerrada para un recurso requerido `kind: blender-scene-spec`, almacenado como JSON UTF-8 local. La especificación declara una entrada por cada `scene.id` del storyboard y solo parámetros semánticos acotados: geometría primitiva/props originales, cámara, iluminación, materiales simples, keyframes y semilla explícita donde aplique. No acepta Python, nombres de módulos, expresiones, rutas arbitrarias, shell, URLs ni configuración de addons. IDs deben corresponder exactamente con el storyboard; no omitir ni duplicar escenas.
+Añadir una allowlist/schema cerrada para un recurso requerido `kind: blender-scene-spec`, almacenado como JSON UTF-8. Un documento declara exactamente una escena, con `scene_spec_version: 1`, `project_id`, `scene_id`, `render`, `materials`, `objects`, `camera` y `lights`. Todos los objetos deben tener claves exactas; campos desconocidos, claves duplicadas, floats no finitos, IDs duplicados, recursos no declarados o valores fuera de límites se rechazan. No hay `extensions`, `extras` ni defaults tácitos.
 
-El JSON de especificación y cada recurso binario futuro se declaran por separado como recursos del proyecto y como inputs Stage 02 para que sus SHA-256 participen en el fingerprint. Los metadatos de licencia/atribución (identificador SPDX cuando esté disponible, autor/fuente, restricciones y aceptación local) deben acompañar cualquier recurso importado. Como el contrato actual de `project.resources` no tiene esos campos, Phase 5B deberá decidir si se añaden campos opcionales compatibles o si se exige un inventario sidecar estricto. **El MVP no importa archivos `.blend`, scripts, addons, ejecutables ni assets externos.**
+Contrato v1 exacto:
 
-El worker solo interpreta versiones de esquema explícitamente soportadas. Desconocidas/ambiguas se rechazan; no hay defaults silenciosos de cámara, duración o assets que cambien la intención.
+- `project_id` debe igualar el proyecto. `scene_id` debe identificar la única escena del storyboard y se fija a un slug ASCII. El MVP exige que esa escena cubra `[0,24)` sin huecos.
+- `render` requiere exactamente: `width: 540`, `height: 960`, `fps: 12`, `start_frame: 0`, `end_frame_exclusive: 24`, `engine: "CYCLES"`, `device: "CPU"`, `samples: 8`, `threads: 2`, `seed` entero entre 0 y 2147483647 (semilla efectiva por frame: `(seed + source_frame) mod 2147483648`), `denoising: false` y `image_format: "PNG_RGB8_SRGB"`. Cualquier discrepancia con storyboard/profile se rechaza; no se convierte ni retima.
+- `materials` requiere de 1 a 12 objetos `{id, base_color_linear_rgba, metallic, roughness}` exactos. RGBA tiene cuatro números en `[0,1]`; metallic en `[0,1]`; roughness en `[0.05,1]`. IDs son slug ASCII único.
+- `objects` requiere de 1 a 24 objetos `{id, primitive, material_id, location_m, rotation_rad, scale}` exactos. `primitive` permite solo `cube`, `uv_sphere`, `cylinder` o `plane`; `material_id` debe resolver a material local declarado. Coordenadas de ubicación se acotan a `[-20,20]` m; rotación a `[-6.28319,6.28319]` rad; cada escala a `[0.05,10]`. No se aceptan instancias ni generadores arbitrarios.
+- `camera` requiere exactamente `{lens_mm, interpolation, keyframes}`. `lens_mm` entre 24 y 50; `interpolation` exactamente `LINEAR`; `keyframes` contiene exactamente dos objetos `{frame, location_m, target_m}` en frames 0 y 23, con ubicación/destino xyz en `[-20,20]` m y distancia cámara-destino mayor que 0.01 m. La ubicación o el target del frame 23 debe diferir al menos 0.01 m del frame 0 para acreditar movimiento de cámara. La orientación deriva del target; interpolación lineal de ubicación/target; no existen defaults de cámara ni keyframes intermedios declarables.
+- `lights` requiere de 1 a 3 luces area con claves `{id, type, location_m, target_m, color_linear_rgb, power_w, size_m}`. `type` es `AREA`; ubicación/target en `[-20,20]` m; RGB en `[0,1]`; potencia entre 1 y 2000 W; size entre 0.1 y 10 m; ubicación distinta del target.
+
+El worker implementa la política cerrada `blender-scene-policy-v1`; estos valores no son defaults de Blender, sino valores que el worker asigna explícitamente y registra. Construye una escena vacía; primitivas centradas con dimensiones base cube 2 m, UV sphere radio 1 m, cylinder radio 1 m/profundidad 2 m y plane 2×2 m en XY; aplica `scale` como factor sobre esa malla. Material Principled BSDF recibe color/metallic/roughness declarados; alpha=1, IOR=1.5, emisión=0 y los demás sockets quedan fijados por policy (no se leen del archivo de usuario). Luz `AREA` de forma square, apunta al target declarado y usa `size_m`/`power_w`; no hay luces o materiales automáticos adicionales.
+
+La policy fija cámara vertical con sensor fit `VERTICAL`, sensor width 36 mm, clip 0.01–100 m, DOF off y orientación -Z/up Y dirigida a `target_m`. Las dos posiciones/targets se interpolan linealmente. World background es negro lineal con strength 0; no hay compositor, motion blur, transparencia de film ni salida alfa. Cycles: CPU, 8 samples, adaptive sampling off, denoising off, max bounces 4 (diffuse/glossy/transmission máximo 2 cada uno), caustics off, semilla por frame según fórmula anterior. Output: PNG RGB8, 100% resolution, pixel aspect 1:1, resolución/FPS del spec, frame start 0 y end Blender inclusivo 23, color management `Standard`, exposure 0, gamma 1 y display sRGB. El worker asigna todos estos valores en código, falla si la versión no expone/acepta un ajuste requerido y comprueba valores efectivos antes de guardar/renderizar.
+
+No se habilitan addons, motores externos, scripts de proyecto, texturas/archivos externos ni autoexec; no hay retiming ni archivos fuente de usuario. Guarda propiedades efectivas en `.blend` y recibo runtime. Cualquier futura ampliación de claves/policy es una revisión del schema/versionado, no aceptación implícita.
+
+El JSON de especificación se declara como recurso requerido del proyecto y como `resource-<id>` en `stages[02].inputs`, así su SHA-256 afecta Stage 02. El MVP no importa archivos `.blend`, scripts, addons, ejecutables ni assets externos. Si se admite un asset en otra fase, su fichero debe ser un recurso requerido separado, listado explícitamente en Stage 02, con inventario/licencia asociado. Como `project.resources` hoy no acepta campos de licencia, Phase 5B debe usar un sidecar de licencia cerrado/versionado para assets o añadir campos opcionales compatibles en una revisión contractual; esto no bloquea el MVP sin assets.
+
+El worker solo interpreta `scene_spec_version: 1`. Versiones desconocidas, claves desconocidas, ID o frames que no correspondan exactamente al storyboard y referencias no declaradas se rechazan antes de lanzar Blender.
 
 ## 5. Contrato del `scene-package`
 
-Stage 02 conserva un solo output declarado por el DAG, pero cambia el contenido al implementar: `.pipeline/work/scenes.zip` (o ruta exclusiva configurada con extensión `.zip`). El archivo es el artefacto `scene-package` registrado en el manifiesto v1 con SHA-256 del ZIP releído. Ninguna extracción automática se realiza durante `validate-manifest`.
+Stage 02 conserva un solo output en el DAG: `.pipeline/work/scenes.zip` (o ruta de output configurada con extensión `.zip`). Es el artefacto `scene-package` del manifiesto v1. La etapa Blender no escribe ZIP, índice, provenance ni hashes autoritativos: produce únicamente `scenes/<scene-id>/scene.blend` y los PNG bajo staging exclusivo asignado por el padre. El padre crea y valida todo lo demás.
 
 Estructura lógica recomendada:
 
@@ -96,11 +129,25 @@ scene-package.zip
   scenes/<scene-id>/frames/frame-000023.png
 ```
 
-`package.json` registra versión del paquete, `project_id`, IDs y orden de escenas, intervalos de frames semiabiertos, FPS, dimensiones, formato/espacio de color declarado, ruta relativa de `.blend`, plantilla/índice de secuencia y por archivo: tamaño y SHA-256. `provenance.json` registra `record_type: productive-local-blender-scenes`, versión de provenance, IDs de corrida/proyecto/etapa, versión real Blender (texto de versión y tupla API), SHA-256 del ejecutable y del worker, hashes/versión de inputs, engine y configuración efectiva, dimensiones/FPS/frames efectivos, semilla, tiempos observados y resultado. No registrar rutas absolutas ni timestamps dentro de material que afecte fingerprints; `created_at` puede residir solo en el manifiesto v1, cuyo timestamp histórico no entra a fingerprints.
+`package.json` lista orden, intervalos semiabiertos, FPS, dimensiones y cada payload con tamaño y SHA-256. Para evitar autocontención imposible, no incluye hashes de sí mismo ni de `provenance.json`; el SHA-256 externo del ZIP en el manifiesto v1 cubre ambos. `provenance.json` informa `record_type: productive-local-blender-scenes`, versión de provenance, IDs de corrida/proyecto/etapa, versión observada (`bpy.app.version` y `version_string`), SHA-256 del ejecutable/worker, inputs/fingerprints, motor/dispositivo/configuración efectiva, dimensiones/FPS/frames, semilla y tiempos observados. No incluye rutas absolutas/timestamps de máquina como inputs de fingerprints.
 
-El validador en el proceso padre debe limitar antes de extraer: tamaño del ZIP, cantidad de entradas, profundidad/nombres relativos POSIX, tamaños comprimidos/descomprimidos acumulados y por miembro, razón de compresión, extensiones esperadas, duplicados/case collisions, CRC, rutas traversal/absolutas/UNC/drive, symlinks de ZIP y miembros no regulares. Rechazar symlink, junction/reparse point en destino y en cada padre según los helpers de publicación. Después de extraer a directorio temporal privado, comprobar inventario exacto, tamaños y SHA-256 de cada miembro; verificar dimensiones/frames PNG con parser acotado y que frames/escenas/rangos coincidan con storyboard. Publicar la estructura a un run/output nuevo sin overwrite y volver a leer sus bytes. La garantía final debe corresponder al modelo de amenaza local confiable ya documentado; no afirmar atomicidad completa entre múltiples archivos ni seguridad ante sustitución hostil concurrente.
+### Índice temporal y numeración
 
-Para conservar la salida v1 como un único fichero verificable, la opción sencilla es mantener el ZIP como artefacto único final y validar su contenido desde copia temporal durante ejecución y `validate-manifest`. Si el consumidor necesita directorio ya extraído, debe extraer en Stage 04 desde el ZIP previamente verificado o acordar en fase posterior cómo registrar múltiples ficheros sin romper v1.
+Cada escena lleva `source_start_frame`, `source_end_frame_exclusive`, `fps_num: 12`, `fps_den: 1` y `frame_count: end-start`. Para el MVP: `[0,24)`, 24 frames y duración exacta 2 s. El PNG `frame-000000.png` corresponde al frame fuente 0 y tiempo `0/12`; `frame-000023.png` al frame 23 y tiempo `23/12` s. Los frames representan muestras de tiempo dentro del intervalo total semiabierto `[0,2 s)`; no se crea un frame 24 ni se incluye un duplicado del límite final.
+
+Los nombres son seis dígitos decimales del frame fuente global, consecutivos desde `start_frame`; no reinician por archivo. Para escenas futuras, cada escena usa sus frames globales propios y rangos no solapados/continuos conforme al storyboard. El padre exige cardinalidad exacta, sin huecos/duplicados. Remotion en Phase 5C debe componer a 12 FPS y mapear `source_frame = start_frame + composition_frame - scene_start`; no cambia FPS ni interpola/descarta/repite frames. 30 FPS y cualquier conversión temporal quedan fuera de Phase 5B y requieren decisión explícita futura.
+
+### Validación read-only estricta del ZIP
+
+`validate-manifest` no puede crear directorios/archivos temporales, extraer ni invocar procesos. Debe abrir el artefacto existente en modo lectura y validar todos sus miembros en streaming mediante `zipfile`/lecturas seekables del propio archivo. Durante la ejecución productiva sí se permite staging privado exclusivo; la validación final usa el mismo validador en memoria/lectura, sin extraer al filesystem. El worker escribe las imágenes ya separadas en staging; el padre no necesita extraer el ZIP para crearlo o validarlo.
+
+El parser acepta solo el inventario esperado y compresión ZIP almacenada/deflate, rechaza cifrado, directorios como miembros, enlaces Unix/symlinks, tipos especiales, nombres duplicados y colisiones case-insensitive. Los paths internos deben ser ASCII POSIX relativos con nombres y prefijos allowlisted (`package.json`, `provenance.json`, `scenes/<slug>/scene.blend`, `scenes/<slug>/frames/frame-<6 dígitos>.png`); rechaza absolutos, `..`, `.`, segmentos vacíos, backslash, drive letters, UNC, NUL y nombres fuera de inventario. Límites propuestos: 27 miembros para MVP (dos JSON + blend + 24 PNG), ZIP <=512 MiB, expansión total <=1 GiB, JSON <=1 MiB cada uno, `.blend` <=512 MiB, PNG <=32 MiB cada uno, razón expansión/comprimido <=100 y exactamente 24 frames. Todos los valores se verifican antes/durante lectura con contadores acumulados, no confiando solo en cabeceras centrales.
+
+Se consume cada miembro entero en chunks acotados para comprobar que `zipfile` valida CRC al EOF y calcular SHA-256 esperado; no se materializan los payloads en RAM. En paralelo se valida magic/header `.blend` y PNG (firma, IHDR/CRC, RGB8, 540×960), y se compara inventario/hash/tamaño del JSON índice con bytes del miembro. JSON estricto rechaza claves duplicadas/desconocidas y comprueba scene IDs, frames, timeline, provenance/runtime y valores contra storyboard/config/manifest. Se verifican `ZipInfo.file_size`, `compress_size`, flags, modo/tipo, count y CRC durante streaming; valores falsificados/inconsistentes se rechazan. El artefacto exterior se hashea por separado y debe coincidir con el manifiesto.
+
+Los checks de rutas symlink/junction/reparse aplican al path del ZIP en proyecto y a sus padres; no hay extracción a directorio destino en `validate-manifest`, por tanto no existe un árbol de extracción que revisar. Estas comprobaciones reducen errores dentro del modelo de proyecto local confiable, sin prometer resistencia TOCTOU frente a actor local hostil.
+
+Durante `run-productive-scenes`, Blender escribe solo al staging exclusivo y el padre crea ZIP/JSON en staging, valida el paquete íntegro en read-only, vuelve a verificar inputs, publica únicamente el ZIP con creación exclusiva, relee SHA-256 final y luego persiste Stage 02 completed. Ningún parcial se adopta automáticamente. Si Stage 04 necesita archivos descomprimidos, los extraerá a su propio staging durante su futura ejecución después de verificar el paquete; no se extraen durante planificación ni validación de manifiesto.
 
 ### Transferencia a Remotion
 
@@ -108,48 +155,53 @@ Remotion recibe `package.json` más secuencias PNG por escena, sus rangos/FPS y 
 
 ## 6. Ejecución segura de Blender
 
-- CLI productiva futura exige ruta absoluta explícita al ejecutable ya instalado (`--blender`). No buscar en PATH ni instalar/descargar runtime.
-- Antes de procesar recursos, una invocación controlada consulta versión del binario con argumento fijo; dentro del worker se lee `bpy.app.version` y `bpy.app.version_string`. Comparar ambos resultados con el rango probado por el proyecto. `availability: verified` solo expresa elegibilidad declarada y nunca reemplaza esta sonda real.
-- Comando argument-list construido exclusivamente por código, `shell=False`, `cwd` del proyecto, worker Python fijo del repo, modo headless (`--background`), autocarga de scripts deshabilitada (`--disable-autoexec`) y código de salida distinto de cero ante excepción (`--python-exit-code 1`). El contrato oficial advierte que argumentos se procesan en orden; el comando deberá fijar orden y validar la versión concreta. Nunca ejecutar scripts, comandos, addons ni rutas tomados del JSON.
-- Worker basado en operaciones `bpy` permitidas por el repositorio, con validación estricta de entrada/salida JSON. Rechazar archivos de proyecto importados y fuentes ejecutables en MVP. Registrar addons solo si se demuestra que vienen incluidos/aprobados; MVP no los habilita.
-- Render con motor/configuración fijados por código. Limitar frames, dimensiones, muestras, hilos, tamaño de paquete y tiempo. Las dimensiones/FPS deben corresponder a storyboard y perfil; validar cámara y que cada escena tenga render. La evidencia debe contener `.blend` no vacío, todos los PNG esperados con cabeceras/dimensiones y hashes válidos, y provenance con runtime observado.
-- Timeout y cancelación: futuro wrapper debe terminar el proceso Blender y sus hijos de forma acotada y esperar su salida; modelar por separado timeout, cancelación, crash y no-cero. Python `subprocess.run(timeout=...)` por sí solo no constituye control portátil completo de árbol de procesos. Dejar parcial sin publicar como output válido y marcar Stage 02 failed; no retries ni resume automático.
-- CPU: `--threads N` limita hilos donde Blender respeta esa opción; no limita CPU total. RAM/VRAM en `profile.limits` son presupuestos declarativos salvo job objects/resource controls/medición del OS implementados y probados. El MVP debe fijar Eevee y CPU o justificar de forma verificable el backend elegido; no prometer control de VRAM por declarar un número. Evitar Cycles GPU en hardware GTX 1650 4 GB hasta medir compatibilidad y presión real.
-- Red/filesystem: no hay aislamiento completo. No afirmar sandbox; el worker local ejecuta dentro de los permisos del usuario. Mantener el modelo de proyecto local confiable, rutas dentro del proyecto/output y no confiar en el renderer como frontera contra código malicioso.
+- CLI exacta: `run-productive-scenes CONFIG --blender ABSOLUTE_PATH`. La ruta se valida como absoluta, archivo regular no symlink/reparse, ejecutable y existente. No se busca PATH ni instala/descarga runtime.
+- Consultar versión real del binario con argumento fijo y confirmar dentro del worker `bpy.app.version`/`version_string`; incompatibilidad de ambos valores falla. `availability: verified` solo permite elegibilidad declarativa, nunca sustituye la sonda real.
+- Construir argv solo en código con `shell=False`, cwd del proyecto, worker fijo, `--background`, `--disable-autoexec`, `--python-exit-code 1` y `--threads 2`. Nunca pasar comandos, scripts, expresiones, módulos o addons desde el JSON. Confirmar el orden de argumentos con la versión del runtime aprobada.
+- **Motor inicial: Cycles CPU.** Fijar `scene.render.engine = CYCLES` y dispositivo `CPU` en código/request; verificar el dispositivo efectivo y registrar su identidad. Cycles documenta CPU como dispositivo compatible, configurable sin GPU. Es la opción inicial reproducible para Windows/headless porque no depende de GPU/contexto gráfico; no garantiza rapidez. El CPU puede exceder timeout y RAM incluso a 540×960, 24 frames; el benchmark local decidirá si los topes/sample count son prácticos.
+- **Eevee:** requiere GPU; descartar cualquier documentación o implementación que lo describa como renderer CPU. Blender documenta Eevee como GPU-only y no soportado en headless Windows. Reconsiderar solo con GPU/driver/contexto gráfico comprobado en la configuración destino, pruebas headless Windows aprobadas y control/observación de VRAM; no fallback dinámico a Eevee.
+- El worker fijo interpreta spec v1 cerrada y crea `.blend` + PNG únicamente bajo staging exclusivo. El padre crea índice/provenance/ZIP, hashea y valida outputs, ejecuta publicación/manifiesto. Ningún hash autoritativo procede del worker.
+- Timeout/cancelación debe terminar proceso Blender y descendientes de forma acotada, esperar término y registrar outcome; `subprocess.run(timeout=...)` por sí solo no asegura terminar árbol de proceso de forma portable. Modelar no-cero, crash y timeout. No retries/resume.
+- `--threads 2` limita hilos configurados en Blender, no CPU total. RAM/VRAM del profile son presupuestos: no cuotas del OS. No afirmar hard limit salvo soporte de OS implementado y probado. Para la ruta CPU VRAM no controla render, aunque Blender/UI/GPU sigan consumiendo memoria.
+- No hay aislamiento completo de filesystem ni red. Blender corre con permisos del usuario. La validación de paths y `--disable-autoexec` reducen superficie, no convierten Blender en sandbox. El MVP no abre archivos externos ni addons.
 
-La documentación de Blender respalda el modo background, la opción `--threads`, el orden semántico de argumentos, el código de salida por excepción y los formatos PNG/OpenEXR. Estos datos fundamentan el diseño del worker, pero no prueban que el Blender local ni el hardware de referencia ejecuten correctamente. Fuentes oficiales: [argumentos de Blender 5.2](https://docs.blender.org/manual/en/5.2/advanced/command_line/arguments.html), [API `bpy.app` 5.2](https://docs.blender.org/api/5.2/bpy.app.html), [formatos de imagen](https://docs.blender.org/manual/en/5.0/files/media/image_formats.html) y [salida de render](https://docs.blender.org/manual/en/5.0/render/output/properties/output.html).
+La documentación oficial respalda capacidades/limitaciones de motores, background/argumentos y versión API, no el rendimiento real. Fuentes: [limitaciones Eevee 5.2](https://docs.blender.org/manual/en/5.2/render/eevee/limitations/limitations.html), [Cycles Render Device 5.2](https://docs.blender.org/manual/en/5.2/render/cycles/render_settings/index.html), [Cycles GPU Rendering 5.2](https://docs.blender.org/manual/en/5.2/render/cycles/gpu_rendering.html), [argumentos Blender 5.2](https://docs.blender.org/manual/en/5.2/advanced/command_line/arguments.html), [API `bpy.app` 5.2](https://docs.blender.org/api/5.2/bpy.app.html), [formatos de imagen](https://docs.blender.org/manual/en/5.0/files/media/image_formats.html). Ninguna referencia acredita una ejecución en el hardware de referencia.
 
 ## 7. Secuencia de ejecución propuesta
 
 ```mermaid
 sequenceDiagram
-  participant CLI as CLI/pipeline.py
-  participant FS as Proyecto y publicación
+  participant CLI as run-productive-scenes / pipeline.py
+  participant FS as Proyecto / staging / publicación
   participant Blender as Blender instalado
   participant W as worker fijo del repo
-  CLI->>FS: validar config, storyboard, recursos y outputs libres
-  CLI->>CLI: verificar elegibilidad Stage 02 y DAG/fingerprints
-  CLI->>FS: publicar manifiesto v1 pending y checkpoint Stage 01
-  CLI->>Blender: ruta absoluta + --version (sonda real)
-  CLI->>Blender: --background --disable-autoexec --python-exit-code 1 --python worker
-  Blender->>W: abrir request declarativo validado, crear escenas y renderizar
-  W->>FS: escribir en staging exclusivo scene.blend + PNG + package/provenance
-  Blender-->>CLI: código de salida y runtime observado
-  CLI->>FS: validar ZIP, PNG, hashes, provenance, inputs sin cambios
-  CLI->>FS: publicar scene-package sin overwrite y releer/hash
-  CLI->>FS: checkpoint Stage 02 completed + manifest v1 verificado
+  CLI->>FS: validar profile/storyboard/spec/inputs y outputs libres
+  CLI->>CLI: validar DAG/fingerprints; generar validated-plan determinista
+  CLI->>FS: publicar y reread/hash validated-plan; checkpoint Stage 01
+  CLI->>Blender: ruta absoluta + versión real
+  CLI->>FS: crear staging exclusivo y request validado
+  CLI->>Blender: background + CPU Cycles + worker fijo
+  Blender->>W: worker lee solo request validado
+  W->>FS: guardar scene.blend y 24 PNG dentro de staging
+  W-->>CLI: recibo runtime observado y frames; sin hashes autoritativos
+  CLI->>FS: revalidar config/inputs; construir índice/provenance/ZIP
+  CLI->>FS: validar ZIP read-only, CRC/miembros/PNG/SHA
+  CLI->>FS: publicar ZIP sin overwrite; reread y hash final
+  CLI->>FS: Stage 02 completed + checkpoint de único manifest v1
 ```
 
-El orden exacto entre publicación de paquete y checkpoint debe tener una recuperación explícita para crash: nunca completar etapa antes de verificar el artefacto final; ante crash entre ambos puede quedar un artefacto huérfano que no se adopta automáticamente. La siguiente invocación usa rutas libres nuevas; inspección y limpieza manual son responsabilidad del operador.
+El padre inicia una invocación con Stage 01 y Stage 02 elegibles; Stage 03/04/05/06 quedan pending en el runner aislado. Crash entre publicación ZIP y checkpoint puede dejar huérfano: no se adopta ni se borra automáticamente; siguiente run usa destinos libres y la inspección/recuperación manual es responsabilidad del operador.
 
 ## 8. Compatibilidad Phase 4B y manifiestos v1
 
-- No alterar constantes/algoritmos actuales de fingerprint ni los contratos v1. Cada recurso usado por Stage 02 debe ser un input explícito para que sus hashes afecten el fingerprint de Stage 02.
-- El fingerprint Stage 02 debe incluir config relevante de etapa/perfil, hash de storyboard, validated-plan, hashes de especificación/recursos y versiones efectivas del runtime/worker con el patrón existente `stage_fingerprint`.
-- El nombre output cambia de `scenes.json` a ZIP solo cuando un perfil Stage 02 productivo opt-in esté implementado. Configuraciones heredadas pendientes pueden seguir declarando su salida actual y validándose como hoy; migración de plantilla/ejemplos debe documentarse sin reescribir manifests históricos.
-- `validate-manifest` v1 valida el registro outer path/hash y el contenido semántico de validated-plan ya existente para perfiles productivos; para Stage 02 debe validar además el paquete contra su inventario/hash interno y la semántica de entradas. No ampliar aceptación de manifests v1 heredados ni requerir campos nuevos obligatorios en sus registros.
-- `run-productive-tts` conserva exactamente selección/ejecución de Stage 01/03 y rechazo de Stage 02 implementada/audiovisual completada. No cambiar comando, defaults ni estado Phase 4B como efecto colateral de Stage 02.
-- Un futuro comando combinado puede despachar etapas implementadas en orden topológico y mantener los mismos helpers/checkpoints, pero cada runner limitado mantiene su allowlist. Sin resume/retries automáticos.
+- El perfil nuevo de `run-productive-scenes` debe contener Stage 01 implementada y Stage 02 elegible/implementada; Stage 03 permanece `pending`, igual que 04/05/06. El ejecutor no requiere el perfil TTS productivo.
+- Stage 01 vuelve a validar pipeline, storyboard, spec y recursos requeridos actuales, crea el mismo `validated-plan` canónico que representa la configuración y **todo el DAG**, incluido Stage 03 pendiente. El recibo conserva IDs/inputs/dependencias/outputs/estados declarados, waves deterministas, profile/workspace relativos, input entries con SHA-256 y `pipeline-config` semántico como pseudoentrada Stage 01. No filtra textos narrativos ni rutas absolutas.
+- El proceso padre relee el recibo publicado y lo compara byte-a-byte/semánticamente contra `_validated_plan` esperado usando la config actual, storyboard, recursos, waves y validación. Antes de Stage 02 vuelve a verificar los mismos inputs/config; tras render los compara nuevamente para detectar cambios concurrentes. Stage 02 depende exclusivamente de Stage 01 y recibe su hash `validated-plan`, storyboard/spec/resources explícitos. Esto preserva invalidación/fingerprint por el algoritmo actual sin cambiarlo.
+- `validate-manifest` debe decidir validación semántica del recibo por elegibilidad de perfil productivo: TTS Phase 4B **o** escenas Phase 5B; esa lectura es estrictamente read-only y el ZIP se inspecciona en streaming sin extraerlo ni crear temporales. En el perfil escenas, aunque Stage 03 esté pending, si Stage 01 está completed el comando verifica validated-plan contra config/storyboard/resources/DAG actuales. No deducir ejecución de `availability`; los IDs/contratos manifest v1 permanecen. Si Stage 01 no está completed no hay recibo por validar y pending sigue válido.
+- No modificar `stage_fingerprint`, `fingerprint`, `pipeline_version: 1`, `manifest_version: 1`, shapes heredadas, ni hacer obligatorios nuevos campos en manifests existentes. Cada resource usada por Stage 02 es input explícito y su hash se incluye en fingerprint Stage 02; su runtime/worker efectivo se incorpora con patrón actual `tool_versions`.
+- `run-productive-scenes CONFIG --blender ABSOLUTE_PATH` ejecuta 01 y 02; manifiesto único v1 indica completed solo esas dos y pending 03/04/05/06. Outputs `.blend`/PNG internos al ZIP se validan; el artefacto manifestado es solo `scene-package` ZIP con SHA-256 externo.
+- `run-productive-tts` mantiene exactamente Stage 01+03 Kokoro, outputs, verified-plan semantics y aceptación existente. No habilita Stage 02 ni cambia por el nuevo perfil. Los fixtures/manifiestos v1 heredados deben seguir pasando sin migración ni reinterpretación de sus fingerprints.
+- El comando combinado 01/02/03 se considera futuro separado; no entra a Phase 5B.
 
 ## 9. Fallos y modelo de amenazas
 
@@ -190,13 +242,13 @@ Después de implementar Phase 5B y disponer de Blender instalado por el usuario,
 
 ## 11. Riesgos y decisiones pendientes antes de Phase 5B
 
-1. **Representación mínima del scene spec:** aprobar esquema declarativo y primitivas/cámara permitidas. El storyboard actual no basta para geometría reproducible.
+1. **Validación de scene spec:** verificar en Phase 5B que el esquema cerrado v1 se implementa sin defaults y que cada campo se mapea a las propiedades guardadas en `.blend`. El storyboard por sí solo no basta para geometría reproducible.
 2. **Worker/código Blender:** confirmar compatibilidad API con Blender 5.2.3 y rango soportado. En esta auditoría no se ejecutó Blender ni se verificó runtime local funcional; el dato anterior de metadatos de instalación no equivale a prueba.
-3. **Motor/performance:** confirmar si MVP ejecuta Eevee CPU; medir tiempo/tamaño/uso en equipo objetivo antes de fijar límites definitivos. Los presupuestos declarativos no son cuotas OS.
-4. **Recursos/licencia:** escoger contrato opcional de metadata sin romper `pipeline_version: 1`; definir cómo verificar licencias y restricciones sin conexión.
-5. **Archivo ZIP:** elegir método estándar de Python y formato de compresión/versiones; probar caps, extracción segura y reproducibilidad del índice. Hash de integridad no garantiza mismo ZIP binario entre versiones/plataformas.
-6. **CLI/perfil:** decidir nombres de comando/opciones y si Phase 5B añade `run-productive-scenes` o una ejecución productiva neutral. No modificar contrato existente de `run-productive-tts`.
-7. **Duración/FPS de MVP:** el objetivo describe duración corta/resolución 540×960 pero no fija FPS ni segundos; propuesta inicial 12 FPS × 2 s requiere aprobación/benchmark local.
+3. **Motor/performance:** motor de MVP decidido como Cycles CPU; medir tiempo/tamaño/uso en equipo objetivo antes de dar por aceptable el límite. Eevee GPU solo vuelve a evaluarse con contexto/driver headless verificados; no hay benchmark de ninguno.
+4. **Recursos/licencia:** MVP no importa recursos externos. Antes de admitirlos, decidir contrato de licencia sidecar/campos opcionales sin romper `pipeline_version: 1`, y cómo verificar restricciones sin conexión.
+5. **Archivo ZIP:** usar `zipfile` de la biblioteca estándar, ZIP almacenado/deflate allowlisted y lectura streaming sin extracción en validación. Phase 5B debe probar límites, CRC, lectura sin escrituras y reproducibilidad del índice. Hash de integridad no garantiza mismo ZIP binario entre versiones/plataformas.
+6. **CLI/perfil:** Phase 5B usa `run-productive-scenes CONFIG --blender ABSOLUTE_PATH`; el runner aislado deja Stage 03/04/05/06 pending. No modificar contrato existente de `run-productive-tts`.
+7. **Duración/FPS de MVP:** fijados en una escena 540×960, 12 FPS, frames `[0,24)` y 24 PNG. La utilidad/rendimiento queda pendiente de la prueba real; conversión a 30 FPS queda fuera de Phase 5B.
 8. **Transferencia Remotion:** fijar contrato de escena, temporización y decoder de secuencia contra la versión real de Remotion; Phase 5A no afirma integración compatible ejecutada.
 9. **Verificación visual:** definir quién aprueba still y secuencia y dónde se registra sin presentar validación técnica como aprobación artística.
 
@@ -204,10 +256,10 @@ Después de implementar Phase 5B y disponer de Blender instalado por el usuario,
 
 ### Phase 5B — Blender productive Stage 02
 
-1. Acordar esquema de recursos/scene spec, runtime mínimo soportado, motor, CLI, topes temporales/de salida y qué evidencia visual se guarda.
+1. Implementar exactamente scene spec v1 y perfil 540×960/12 FPS/[0,24), Cycles CPU, CLI separada y topes acordados; runtime Blender real sigue siendo preflight obligatorio.
 2. Implementar allowlist/validación de inputs, preflight Blender real y worker fijo; no scripts desde pipeline JSON ni descarga.
 3. Reutilizar helpers de Stage 01, fingerprint, manifiesto v1, checkpoints y publicación; activar Stage02 solo en perfil nuevo/opt-in. Preservar `run-productive-tts` y entradas/manifiestos v1 heredados.
-4. Implementar ZIP autocontenido con `.blend`, frames renderizados por escena, índice/provenance, extracción y verificación acotadas, SHA outer e internos y publicación sin overwrite.
+4. Implementar ZIP autocontenido con `.blend`, 24 PNG, índice/provenance parent-owned, validación read-only streaming de CRC/hashes/dimensiones y publicación exclusiva; no extraer en validate-manifest.
 5. Añadir tests mock multiplataforma por la matriz anterior; ejecutar suite completa. No descargar Blender en CI.
 6. Criterio técnico: éxito mock genera manifiesto v1 válido; 01/02 completed solo después de reread/hash; 03/04/05/06 pending para runner Stage02 aislado; fallo nunca produce Stage02 completed ni output reutilizable; Phase 4B sin regresiones.
 7. Criterio local separado: un run Blender real en escena mínima y revisión humana de still/secuencia evidencia cámara/movimiento; publicar versiones, hashes, tiempos, tamaños y limitaciones reales sin confundirlo con rig/personaje/audio/video final.
