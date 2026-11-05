@@ -1,13 +1,13 @@
 # Cinematic Shorts Pipeline
 
-**A Codex skill and Python toolkit for planning, validating, and locally piloting parts of a cinematic 3D short workflow.** The repository turns a creative brief into reviewable story and storyboard documents, checks versioned production contracts, and includes a standalone local Kokoro speech pilot. The audiovisual production DAG is declared and inspectable; it is not an end-to-end production runner.
+**A Codex skill and Python toolkit for planning and validating cinematic 3D shorts, with verified local Kokoro TTS execution for two pipeline stages.** It turns a creative brief into reviewable plans, checks versioned contracts, and can produce narration through a local productive TTS profile. Blender scenes, Remotion composition, FFmpeg finalization, and end-to-end video generation are not implemented.
 
 [![GitHub Actions](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/actions/workflows/validate.yml/badge.svg?branch=main)](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/actions/workflows/validate.yml)
 [![MIT License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](.github/workflows/validate.yml)
 [![Codex Skill](https://img.shields.io/badge/Codex-Skill-6f42c1.svg)](.agents/skills/cinematic-shorts-pipeline/SKILL.md)
 
-**Resumen en español:** Skill de Codex y validadores Python para planificar cortos 3D, validar storyboards y contratos de pipeline, y probar voz con Kokoro local mediante un comando independiente. Blender, Remotion, FFmpeg y la ejecución productiva del DAG siguen pendientes.
+**Resumen en español:** Skill de Codex y validadores Python para planificar cortos 3D y validar contratos. Incluye piloto Kokoro standalone y TTS productivo local limitado a Stage 01/03. Blender, Remotion, FFmpeg y la generación completa de video siguen pendientes.
 
 ## Contents
 
@@ -18,6 +18,7 @@
 - [Installation and requirements](#installation-and-requirements)
 - [Quick start](#quick-start)
 - [Kokoro local TTS pilot](#kokoro-local-tts-pilot)
+- [Productive local TTS](#productive-local-tts)
 - [Examples](#examples)
 - [Validation and testing](#validation-and-testing)
 - [Project structure](#project-structure)
@@ -30,7 +31,7 @@
 
 Planning a short involves linked decisions about story, shots, art direction, motion, voice, timing, tools, and review. This project makes those decisions explicit as documents and versioned data so they can be checked before production work begins.
 
-The repository contains a discoverable Codex skill, examples and templates, and local Python validators. It separates validated plans from production: validators check declared structures and constraints, and `run-tts-kokoro` is the only real speech synthesis command. That command is a local pilot, not execution of the production DAG.
+The repository contains a discoverable Codex skill, examples/templates, and local Python validators. `run-tts-kokoro` is a standalone local speech pilot. `run-productive-tts` executes a limited production profile: validation/receipt Stage 01 and local Kokoro narration Stage 03, with a v1 manifest. This is not an executor for the complete audiovisual DAG.
 
 ## Current capabilities
 
@@ -41,11 +42,12 @@ The repository contains a discoverable Codex skill, examples and templates, and 
 - **Pipeline and manifest contracts:** validate a `pipeline_version: 1` DAG, preview deterministic dependency waves, and validate an existing `manifest_version: 1` manifest and its fingerprints.
 - **Mock TTS:** `simulate-tts` builds and verifies a silent WAV in memory. `save-tts-simulation` explicitly publishes the mock WAV and provenance under `.pipeline/simulations/tts/`.
 - **Local Kokoro pilot:** `run-tts-kokoro` runs one real CPU synthesis for `em_alex` / `es` and publishes a verified WAV with provenance under `.pipeline/tts-local-runs/`. This is independent of DAG execution.
+- **Productive local TTS:** `run-productive-tts` executes Stage 01 and Stage 03 for the supported Kokoro profile, writes a validated plan, WAV, provenance and v1 manifest, and leaves audiovisual stages pending. It uses the same fixed Kokoro worker as the standalone pilot.
 - **Regression coverage:** standard-library tests cover validators, pipeline contracts, TTS simulation/publication, and the Kokoro worker through simulated runtime objects.
 
 ## Architecture
 
-The planning layer validates project data and previews the graph. Mock TTS and the local Kokoro pilot are separate commands. The pipeline stages shown below are dependencies declared by configuration; the planner does not execute them.
+The planning layer validates project data and previews the graph. Mock TTS, standalone Kokoro, and productive TTS are separate commands. Productive TTS executes only the two highlighted stages; other graph stages remain declarations.
 
 ```mermaid
 flowchart TB
@@ -62,39 +64,42 @@ flowchart TB
     Config --> ManifestCheck
   end
 
-  subgraph DeclaredDAG["Declared production DAG · not executed"]
-    ProjectCheck["01 Validate project<br/>adapter declared implemented"]
+  subgraph ProductiveTTS["Implemented local profile · Phase 4B"]
+    ProjectCheck["01 Validate project<br/>validated-plan + manifest checkpoint"]
+    TTSStage["03 Kokoro narration<br/>verified WAV + provenance"]
+    ProjectCheck --> TTSStage
+  end
+
+  subgraph DeclaredDAG["Audiovisual stages · pending"]
     Blender["02 Blender scenes<br/>pending"]
-    TTSStage["03 TTS narration adapter<br/>pending"]
     Remotion["04 Remotion compose<br/>pending"]
     FFmpeg["05 FFmpeg finalize<br/>pending"]
     QA["06 Quality control<br/>pending"]
-    ProjectCheck --> Blender
-    ProjectCheck --> TTSStage
     Blender --> Remotion
     TTSStage --> Remotion
     Remotion --> FFmpeg --> QA
   end
 
+  ProjectCheck --> Blender
   StoryCheck -. storyboard referenced by config .-> Config
   Preview -. previews dependencies only .-> ProjectCheck
 
-  subgraph Speech["Implemented separately: local speech commands"]
+  subgraph Speech["Local speech commands"]
     TTSContract["TTS contract and script"] --> Mock["simulate-tts / save-tts-simulation"]
     TTSContract --> Kokoro["run-tts-kokoro<br/>standalone pilot"]
   end
   Config -. standalone command input only .-> TTSContract
 ```
 
-The Kokoro command does not connect the local pilot output to the declared TTS stage. The DAG adapter remains `pending`; see [pipeline orchestration](.agents/skills/cinematic-shorts-pipeline/references/pipeline-orchestration.md) for the contract and execution boundaries.
+The standalone pilot does not complete a DAG stage. The productive profile completes only Stage 01 and Stage 03 after verifying outputs and manifest. See [pipeline orchestration](.agents/skills/cinematic-shorts-pipeline/references/pipeline-orchestration.md) for eligibility and execution boundaries.
 
 ## How the pipeline works
 
 1. Use the [Codex skill](.agents/skills/cinematic-shorts-pipeline/SKILL.md) to turn a brief into a story, art direction, storyboard, and technical plan with review gates.
 2. Validate the storyboard and project-local resources. Optional cinematography, animation, and timing blocks remain planning data.
 3. Describe tools, stage dependencies, inputs, outputs, and adapter states in `pipeline.json`. `plan` and `dry-run` show the declared graph and blockers without running it.
-4. Use the mock commands to inspect or retain simulated TTS output, or explicitly run the standalone Kokoro pilot when a compatible local runtime and assets are available.
-5. Review generated audio manually. No command currently executes the audiovisual DAG or completes a production stage.
+4. Use mock commands for contract checks, `run-tts-kokoro` for a standalone voice pilot, or explicitly run `run-productive-tts` with the supported local Kokoro profile.
+5. Review generated speech manually. Only Stage 01 and Stage 03 can complete; no command executes the audiovisual DAG end to end.
 
 | Command | Effect |
 | --- | --- |
@@ -105,12 +110,13 @@ The Kokoro command does not connect the local pilot output to the declared TTS s
 | `simulate-tts CONFIG --backend mock` | Verify a mock WAV and provenance in memory; writes nothing. |
 | `save-tts-simulation CONFIG` | Publish mock WAV and JSON provenance in a new local simulation directory. |
 | `run-tts-kokoro CONFIG --python PATH --model PATH --voices PATH` | Run one explicit local Kokoro pilot and publish verified WAV and provenance outside the DAG outputs. |
+| `run-productive-tts CONFIG --python PATH --model PATH --voices PATH` | Run only Stage 01 and productive Kokoro Stage 03; publish configured outputs and a v1 manifest. |
 
 ## Installation and requirements
 
 - **Validation and tests:** Python 3.12 is used in GitHub Actions. The validators and test suite use the Python standard library; no project dependency installation is needed for them.
 - **Codex skill:** open the repository in Codex and invoke `$cinematic-shorts-pipeline`. Codex is not needed to run the validators.
-- **Kokoro pilot:** requires a pre-existing compatible Python environment, `kokoro-onnx` 0.6.1, its runtime dependencies, a local ONNX model, and a local voice file. The worker supports Python 3.10 through 3.13 and refuses other versions. The repository does not bundle or download these assets.
+- **Kokoro pilot and productive TTS:** require a pre-existing compatible Python environment, `kokoro-onnx` 0.6.1 and required runtime dependencies, a local ONNX model, and a local voice file. The worker supports Python 3.10 through 3.13. The repository does not bundle, install, or download runtime/assets.
 
 The verified local pilot used Python 3.12.10, `kokoro-onnx` 0.6.1, ONNX Runtime 1.31.1, NumPy 2.5.4, phonemizer 3.6.0, `espeakng-loader` 0.2.4, and SoundFile 0.14.0. These are recorded observations from that runtime, not a lockfile for every environment.
 
@@ -204,6 +210,25 @@ The pilot is limited to an 8 KiB script, 300 seconds of audio, and a 16 MiB WAV.
 
 One real local CPU pilot with `em_alex` / `es` was validated. It is evidence that the configured local runtime produced a technically valid spoken WAV, not a benchmark or an automated quality/intelligibility assessment. GitHub Actions use test doubles and do not fetch models or run real inference.
 
+## Productive local TTS
+
+Use `run-productive-tts` only when explicitly requesting local productive narration for a project whose `pipeline_version: 1` config satisfies the Phase 4B Kokoro profile. It is not a general DAG executor and is not a replacement for the standalone pilot above.
+
+The productive profile requires Stage 01 to declare the `pipeline-config` pseudo-input, `storyboard`, and required resources included in the validated receipt. Stage 03 must be `03-tts-narration`, use `adapter: tts-narration`, declare `adapter_status: implemented`, depend **only** on `01-validate-project`, and include `validated-plan` plus `resource-voiceover-script` as inputs. Its outputs must be the configured `narration` `.wav` and `narration-provenance` `.json`. Kokoro must be the only tool and declare `availability: verified` / implemented; the worker independently probes the actual runtime. Other audiovisual adapters must remain pending.
+
+The supported execution is fixed: `kokoro-onnx` 0.6.1, Python 3.10–3.13, `CPUExecutionProvider`, `em_alex`, Spanish (`es`), WAV mono PCM16 at 24 kHz. The script limit is 8 KiB; output limit is 300 seconds / 16 MiB WAV. Supply existing local interpreter, model and voices using absolute paths; the command does not download or install them.
+
+```powershell
+python -B .agents/skills/cinematic-shorts-pipeline/scripts/pipeline.py run-productive-tts CONFIG --python PYTHON_ABSOLUTO --model MODELO_ONNX_ABSOLUTO --voices VOCES_ABSOLUTAS
+python -B .agents/skills/cinematic-shorts-pipeline/scripts/pipeline.py validate-manifest CONFIG MANIFEST_GENERADO
+```
+
+`run-productive-tts` first writes/verifies `validated-plan.json` and checkpoints Stage 01 in a new v1 run manifest. It then invokes the existing fixed Kokoro worker once, verifies WAV and provenance after writing, and completes Stage 03 only after final manifest validation. Successful runs leave Stage 02/04/05/06 pending. `validate`, `plan`, `dry-run`, `validate-manifest` and `simulate-tts` remain read-only/no-worker; `save-tts-simulation` writes mock audio only. `run-tts-kokoro` remains standalone, writes under `.pipeline/tts-local-runs/`, and leaves stages/manifests untouched.
+
+No retry, resume or automatic adoption of orphaned files is implemented. Existing output paths cause a collision; choose new paths through an explicit config change. Fingerprints preserve the existing v1 algorithm: semantic `pipeline-config` is a Stage 01 pseudo-input, and the validated-plan hash plus script hash feed Stage 03. The manifest stores the observed runtime/dependency versions, worker/model/voices hashes and artifact hashes. `validate-manifest` verifies current project semantics and recorded artifacts; it does not rerun Kokoro or authenticate model origin/license.
+
+Phase 4B automated tests use mocks and do not perform inference. Separately, one real local inference was completed on Windows; no real Ubuntu inference was run. See the [Phase 4B design and evidence](.agents/skills/cinematic-shorts-pipeline/docs/productive-tts-execution-design.md) for the recorded runtime, versions, hashes and measured timing. The test evidence and the single real inference are distinct.
+
 ## Examples
 
 The repository examples are fictional planning packages, not generated media:
@@ -223,9 +248,9 @@ python -B -m unittest discover -s .agents/skills/cinematic-shorts-pipeline/tests
 python -B .agents/skills/cinematic-shorts-pipeline/scripts/validate-skill.py .agents/skills/cinematic-shorts-pipeline
 ```
 
-The suite contains 154 tests. For PR #9, all three GitHub Actions jobs passed: Ubuntu 24.04 and Ubuntu 26.04 each ran 154 tests with 153 passes and one Windows-only test skipped; Windows 2025 ran 154 tests with no skips or failures. The workflow also validates the skill and examples, checks pipeline configurations and read-only plans, and validates storyboard examples. See the [PR #9 workflow run](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/actions/runs/41980377295).
+The Phase 4B suite ran 176 automated tests locally on Windows: 173 passed, 3 skipped for symlink privileges (`WinError 1314`). For PR #12, all three GitHub Actions jobs passed on Ubuntu 24.04, Ubuntu 26.04, and Windows 2025. Those tests use mocks; they do not run real Kokoro inference. Workflow also validates skill/examples, pipeline configurations, read-only plans and storyboards.
 
-The 17 Kokoro adapter tests use simulated runtime/model files and fakes. CI never downloads Kokoro assets or performs inference. The real local pilot was run separately on the operator's existing runtime and is not part of the 154-test CI suite.
+Kokoro worker and productive TTS tests use simulated runtime/model files and fakes. CI never downloads assets or performs inference. The single real local inference was run separately on Windows and is not part of the automated test count; no real Ubuntu inference is claimed. Runtime details are in the Phase 4B evidence document.
 
 Automated checks validate declared structure and contracts. They do not judge story quality, verify rig compatibility, assess spoken intelligibility, or prove audiovisual synchronization.
 
@@ -248,27 +273,29 @@ Automated checks validate declared structure and contracts. They do not judge st
 
 ## Security and design decisions
 
-- `pipeline_version: 1`, `manifest_version: 1`, legacy stage IDs, and fingerprints are preserved. The TTS provider allowlist is declarative; configuration JSON cannot supply a shell command, module, or script to execute.
-- The four planning and validation commands and `simulate-tts` are read-only. `save-tts-simulation` is an explicit mock publication. `run-tts-kokoro` is an explicit local process operation using a fixed worker and CPU provider.
-- Model, voice, interpreter, and script paths are checked before execution. The pilot hashes the script, WAV, model, and voices and records the results in provenance.
-- Publication uses exclusive run directories and verifies the files after writing. The supported threat model is a trusted local project whose directory parents are not being changed concurrently by hostile processes. This is not a complete TOCTOU defense or a transactional two-file commit.
-- A 300-second worker timeout is enforced. The implementation does not enforce CPU or RAM limits, and the WAV size limit is checked after synthesis; it is not a memory cap. No network isolation is provided.
+- `pipeline_version: 1`, `manifest_version: 1`, legacy stage IDs, and the fingerprint algorithm are preserved. The productive profile adds semantic `pipeline-config` input only to Stage 01; validated-plan feeds Stage 03. JSON cannot supply a shell command, module, or script to execute.
+- `validate`, `plan`, `dry-run`, `validate-manifest` and `simulate-tts` are read-only/no-worker. `save-tts-simulation` publishes mock output. `run-tts-kokoro` runs the standalone pilot; `run-productive-tts` publishes productive outputs and a manifest for Stage 01/03 only.
+- The fixed worker requires explicit absolute interpreter/model/voices paths, verifies actual Python/dependencies/provider/voice, and records observed versions and SHA-256 hashes. `availability: verified` alone does not prove the runtime exists.
+- Productive publication is exclusive and reread/hash-verified. The manifest is checkpointed atomically per file, but WAV, provenance and manifest are not one transaction. Orphaned outputs are not adopted; recovery is manual. Supported threat model is a trusted local project without hostile concurrent path replacement; TOCTOU and network isolation are not fully solved.
+- One worker attempt, 300-second timeout, no retries/resume. CPU/RAM/VRAM are not enforced. WAV size/duration are checked after synthesis, not a memory cap.
 - The repository does not bundle Kokoro models, voice files, or other media. Check each third-party asset's license and attribution terms before use or redistribution.
 
 ## Current limitations
 
-- The DAG is declarative and previewable; there is no production DAG runner, stage scheduling, retry, or recovery implementation.
-- `run-tts-kokoro` is limited to one local provider/voice/language configuration. It does not make the Kokoro DAG adapter `implemented` or mark the TTS stage complete.
+- The productive runner is limited to Stage 01 and Stage 03 for Kokoro; it is not a general DAG scheduler or recovery engine. No retries, resume, or automatic orphan adoption.
+- `run-tts-kokoro` remains a standalone pilot and does not mark stages complete. Productive TTS supports only Kokoro 0.6.1, `em_alex` / `es`, CPUExecutionProvider, mono PCM16 WAV at 24 kHz.
 - Piper is a recognized contract provider, not an executable adapter.
-- Blender scene generation, Remotion composition, FFmpeg finalization, production quality control, caption alignment, and complete video generation are not implemented as pipeline executors.
-- Storyboard and timing checks do not establish visual quality, animation continuity, speech intelligibility, or synchronization. The pilot requires human listening review.
+- Blender scene generation, Remotion composition, FFmpeg finalization, production quality control, caption alignment, and complete video generation are not implemented as pipeline executors. Stages 02/04/05/06 remain pending.
+- Storyboard and timing checks do not establish visual quality, animation continuity, speech intelligibility, or synchronization. TTS output requires human listening review.
 - No effective CPU/RAM/VRAM limits, network isolation, or complete TOCTOU guarantee are provided.
 
 ## Roadmap
 
 - **v0.8 — TTS contracts and mock publication:** merged through PRs [#6](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/pull/6), [#7](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/pull/7), and [#8](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/pull/8).
-- **v0.9 — Standalone Kokoro local pilot:** merged through [PR #9](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/pull/9). Real local speech generation is available only through the explicit pilot command; production DAG integration remains future work.
-- **Next:** integrate TTS into the DAG with production artifact/state handling, then implement and validate audiovisual stage adapters in separately reviewed phases.
+- **v0.9 — Standalone Kokoro local pilot:** merged through [PR #9](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/pull/9). `run-tts-kokoro` remains separate from productive stages.
+- **v0.10 Phase 4A/4B — Productive local TTS:** approved design and productive Stage 01/03 implementation merged through [PR #12](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/pull/12), merge commit `aba0b4335062655291488b2ec128ee05922aff16`. Automated CI passed on Ubuntu 24.04, Ubuntu 26.04 and Windows 2025; one real local Kokoro inference was validated on Windows only.
+- **v0.10 Phase 4C — Documentation & Release Readiness:** documentation-only work under independent review; no audiovisual implementation or media generation.
+- **Next:** plan and review audiovisual adapters separately. Blender, Remotion, FFmpeg and complete short generation remain unimplemented.
 
 See the [full roadmap](.agents/skills/cinematic-shorts-pipeline/docs/roadmap.md) for phase details.
 

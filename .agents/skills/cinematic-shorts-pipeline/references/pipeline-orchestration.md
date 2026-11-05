@@ -2,32 +2,32 @@
 
 ## Alcance
 
-El pipeline versionado usa `pipeline_version: 1`, independiente de `schema_version: 1` en storyboards. Describe un plan local y determinista; no ejecuta etapas, descarga recursos, consulta la red ni instala herramientas. La CLI valida el storyboard con el validador compartido.
+El pipeline versionado usa `pipeline_version: 1`, independiente de `schema_version: 1` en storyboards. Describe un DAG local determinista. La CLI valida el storyboard con el validador compartido. `validate`, `plan`, `dry-run`, `validate-manifest` y la simulación en memoria no ejecutan etapas; `run-productive-tts` es la excepción acotada que ejecuta Stage 01 y Stage 03 para el perfil local Kokoro aprobado. No descarga recursos, instala herramientas ni invoca Blender, Remotion o FFmpeg.
 
-La carpeta que contiene `pipeline.json` es la raíz del proyecto. El storyboard y los recursos se nombran con rutas POSIX relativas a esa raíz. Se rechazan rutas absolutas, segmentos `..`, separadores Windows y enlaces simbólicos que resuelvan fuera del proyecto. Salidas previstas deben quedar bajo `workspace.intermediate_dir` o `workspace.artifact_dir`.
+La carpeta que contiene `pipeline.json` es la raíz del proyecto. El storyboard y los recursos se nombran con rutas POSIX relativas a esa raíz. Se rechazan rutas absolutas, segmentos `..`, separadores Windows y enlaces simbólicos que resuelvan fuera del proyecto. Las salidas de etapa deben quedar bajo `workspace.intermediate_dir` o `workspace.artifact_dir`; los manifiestos usan `workspace.manifest_dir`. Los comandos de planificación no crean esos directorios; los comandos de publicación/ejecución sí crean sus destinos exclusivos.
 
 ## Contrato
 
 - `project`: ID estable, ruta del storyboard y recursos (`id`, `path`, `required`, `kind` opcional). Las etapas hacen referencia a un recurso como `resource-<id>`.
 - `profile`: ancho, alto, FPS, formato y límites de CPU/RAM/VRAM/concurrencia. El FPS debe coincidir con `storyboard.fps`; v0.5 no retima. Si el storyboard declara `aspect_ratio`, ancho y alto deben tener esa misma proporción; sus componentes deben tener como máximo 128 dígitos y todavía no hay recorte ni adaptación. La plantilla usa 540×960, 30 FPS, 2 hilos, 8 GB RAM, 3 GB VRAM y concurrencia 1 como valores conservadores para el equipo objetivo; son límites de planificación, no mediciones del motor.
-- `workspace`: directorios previstos para intermedios, entregables y manifiestos. La CLI no los crea.
+- `workspace`: directorios previstos para intermedios, entregables y manifiestos. Las órdenes de solo lectura no los crean.
 - `tools`: nombres ejecutables simples, requisito de versión, disponibilidad y estado del adaptador. `executable` es dato descriptivo: nunca se interpreta como comando o argumento.
 - `stages`: IDs, adaptador declarativo, estado del adaptador, dependencias, referencias de entrada, artefactos de salida y herramientas requeridas. Cada entrada de artefacto se resuelve a una entrada del proyecto o a una salida producida por un ancestro del grafo.
-- `retry_policy`: máximo de intentos, clases de error reintentables y política de reanudación por huellas. Se valida, pero no hay reintentos automáticos en v0.5.
+- `retry_policy`: máximo de intentos, clases de error reintentables y política declarada de reanudación por huellas. Se valida, pero Phase 4B no implementa retries ni resume.
 
 ## Contrato narrativo TTS (v0.8, fase 1)
 
 El pipeline v1 requiere exactamente una etapa narrativa: la heredada `03-kokoro-narration` o la neutral `03-tts-narration`. No se reescriben IDs: dependencias y manifiestos conservan el ID declarado. Configuraciones y manifiestos v1 heredados siguen validándose con sus fingerprints originales. `templates/pipeline.json` y `examples/cave-exploration/pipeline.json` conservan la forma heredada; el contrato neutral se demuestra en `examples/tts-contract/pipeline.json`.
 
-La etapa neutral exige un objeto `tts` estricto con `provider`, `voice`, `language`, `audio` y `script_input`. Los proveedores declarados reconocidos por el código son `kokoro` y `piper`; son identificadores de contrato, no una afirmación de instalación, disponibilidad, verificación o ejecución. La etapa debe declarar exactamente una herramienta: la registrada para el proveedor elegido. No se aceptan herramientas auxiliares en esta fase. Además, `03-tts-narration` depende directamente de `01-validate-project`, para que su orden sea explícito y fácil de verificar; esta regla nueva no se aplica a `03-kokoro-narration`. `adapter_status` del adaptador TTS permanece `pending`. Los objetos `tts` y `tts.audio` rechazan campos desconocidos; no admiten comandos, argumentos de shell, módulos, rutas de scripts, URLs de instalación/descarga ni código.
+La etapa neutral exige un objeto `tts` estricto con `provider`, `voice`, `language`, `audio` y `script_input`. Los proveedores declarados reconocidos por el código son `kokoro` y `piper`; son identificadores de contrato, no una afirmación de instalación, disponibilidad, verificación o ejecución. La etapa debe declarar exactamente una herramienta: la registrada para el proveedor elegido. No se aceptan herramientas auxiliares. Además, `03-tts-narration` depende directamente de `01-validate-project`; esta regla no se aplica a `03-kokoro-narration`. El TTS neutral sigue `pending` salvo el perfil productivo Kokoro definido más abajo. Los objetos `tts` y `tts.audio` rechazan campos desconocidos; no admiten comandos, argumentos de shell, módulos, rutas de scripts, URLs de instalación/descarga ni código.
 
 `tts.audio` fija `container: "wav"`, `sample_rate_hz` en 16000, 22050, 24000, 32000, 44100 o 48000, `channels` en 1 o 2 y `sample_format` en `pcm_s16le`, `pcm_s24le` o `pcm_f32le`. `script_input` debe ser `resource-voiceover-script`, que también debe aparecer en `stages[].inputs`.
 
 La etapa genérica requiere `project.resources` con `id: "voiceover-script"`, `kind: "voiceover-script"`, `required: true` y una ruta relativa confinada al proyecto. El archivo debe existir, contener UTF-8 válido y texto no vacío, y no exceder 1 MiB. Se acepta y elimina un BOM UTF-8; se rechazan bytes inválidos, contenido solo de espacios y NUL. El texto no se obtiene de captions. La ruta declarada participa en `inputs_fingerprint`; su hash también entra al fingerprint de etapa a través del input explícito.
 
-La etapa declara exactamente dos artefactos futuros: `narration` con extensión `.wav` y `narration-provenance` con extensión `.json`. Las reglas comunes del pipeline verifican confinamiento bajo el workspace y ausencia de colisiones. El futuro sidecar usa `provenance_version: 1` e identifica proveedor, nombre/versión real del runtime, modelo/versión, voz, idioma, parámetros WAV efectivos, duración medida, SHA-256 del guion y SHA-256 del WAV. El hash del propio sidecar corresponde al artefacto registrado en el manifiesto; no se incluye a sí mismo. En fase 1 no se crea el sidecar ni se declaran valores medidos.
+La etapa declara exactamente dos artefactos: `narration` con extensión `.wav` y `narration-provenance` con extensión `.json`. Las reglas comunes verifican confinamiento bajo el workspace y ausencia de colisiones. En el contrato neutral pendiente no se crean artefactos ni se declaran valores medidos. En el perfil productivo, el sidecar `provenance_version: 1` registra proveedor, versiones observadas, hashes del runtime y assets, voz, idioma, parámetros WAV efectivos, duración, SHA-256 del guion y del WAV; su propio hash se registra en el manifiesto.
 
-Estos son contratos de planificación. En fase 1 no había comando de ejecución ni proveedor ejecutable. El ejemplo declara disponibilidad `not_checked` y adaptadores `pending`; las listas estáticas de proveedores no cambian esos estados.
+Los contratos neutrales de ejemplo siguen siendo de planificación. El ejemplo declara disponibilidad `not_checked` y adaptadores `pending`; la allowlist no cambia esos estados. El comando productivo solo admite el perfil ejecutable descrito en Phase 4B.
 
 La configuración ejemplo vive junto al storyboard que referencia en `examples/cave-exploration/pipeline.json`. `templates/pipeline.json` usa el storyboard plantilla ubicado en la misma carpeta. Edita una copia para cada proyecto.
 
@@ -36,7 +36,7 @@ La configuración ejemplo vive junto al storyboard que referencia en `examples/c
 ```mermaid
 flowchart TD
   V[Validar proyecto y recursos] --> B[Preparar escenas y animación · Blender]
-  V --> K[Planear narración · etapa TTS declarativa]
+  V --> K[Stage 03 TTS · pending salvo perfil productivo Kokoro]
   B --> R[Componer · Remotion]
   K --> R
   R --> F[Finalizar · FFmpeg]
@@ -85,25 +85,55 @@ La frecuencia devuelta debe ser 24 kHz; no se remuestrea. El worker genera RIFF/
 
 Este piloto no usa `.pipeline/work`, `.pipeline/artifacts` ni `.pipeline/simulations/tts/`; no cambia IDs, fingerprints, `pipeline_version: 1`, `manifest_version: 1`, estado `adapter_status` ni manifiestos. Tampoco declara completada la etapa productiva. La publicación usa creación exclusiva y verificación posterior bajo el modelo de proyecto local confiable; no promete resistencia TOCTOU completa ni atomicidad transaccional de los dos archivos. El límite de salida se comprueba después de que el motor devuelve su arreglo de audio: no es un límite de RAM. El timeout detiene el worker pero no establece límites de CPU/RAM/VRAM. La ausencia de llamadas de red conocidas no equivale a aislamiento de red.
 
+## Phase 4B: ejecución productiva local TTS v0.10
+
+`python -B .agents/skills/cinematic-shorts-pipeline/scripts/pipeline.py run-productive-tts CONFIG --python PYTHON_ABSOLUTO --model MODELO_ONNX_ABSOLUTO --voices VOCES_ABSOLUTAS` ejecuta una síntesis local productiva. Requiere un `pipeline_version: 1` configurado explícitamente para Kokoro. El repositorio no incluye una configuración productiva lista para ejecutar ni instala runtime/modelo/voces.
+
+### Perfil y etapas admitidas
+
+- Stage 01 (`01-validate-project`) está `implemented` y declara como inputs `pipeline-config`, `storyboard` y los recursos requeridos representados en el recibo. `pipeline-config` es una pseudentrada reservada para Stage 01; su hash es el fingerprint semántico de la configuración parseada/canonicalizada.
+- Stage 03 (`03-tts-narration`) declara `adapter_status: implemented`, `adapter: tts-narration`, proveedor/herramienta `kokoro`, y depende exclusivamente de Stage 01. Inputs incluyen `validated-plan` y `resource-voiceover-script`; outputs son exactamente `narration` WAV y `narration-provenance` JSON en las rutas del config.
+- TTS productivo admite solo voz `em_alex`, idioma `es` y WAV mono PCM16 little-endian a 24 kHz. La herramienta Kokoro declara `availability: verified`, `adapter_status: implemented` y el requisito de Kokoro ONNX 0.6.1, Python `>=3.10,<3.14` y CPUExecutionProvider. Esos campos permiten elegibilidad; el worker verifica el runtime real.
+- Las etapas audiovisuales 02/04/05/06 deben conservar `adapter_status: pending`; el ejecutor no las llama ni las completa. Piper, `03-kokoro-narration` legado y herramientas adicionales no son elegibles.
+- `CONFIG` y las rutas absolutas de Python/modelo/voces se validan antes de la inferencia. No se acepta que el JSON seleccione comandos, módulos, argumentos, scripts o rutas runtime.
+
+`validate`, `plan` y `dry-run` validan o muestran el perfil de forma declarativa: no prueban que haya runtime y no lanzan el worker. `dry-run` mantiene sus garantías de solo lectura. `validate-manifest` lee y valida un manifiesto existente; tampoco crea ni reanuda ejecuciones. `run-productive-tts` sí escribe el manifiesto y artefactos, e invoca una vez el worker fijo `scripts/tts-kokoro-worker.py`.
+
+### Stage 01 y fingerprints
+
+Stage 01 valida config, storyboard y recursos capturados, y publica `validated-plan.json` determinista, UTF-8 y sin texto narrativo, timestamps ni rutas absolutas. Incluye fingerprint semántico de config, profile/workspace relativos, resultado de validación, inputs ordenados con tamaños/SHA-256, DAG/waves y stage fingerprint. El ejecutor relee y valida el recibo antes de completar Stage 01.
+
+No se modifica el algoritmo existente de `stage_fingerprint` ni los contratos `pipeline_version: 1` / `manifest_version: 1`. `pipeline-config` se añade como pseudentrada solo al Stage 01 productivo; configs heredadas conservan sus inputs/fingerprints. El hash de `validated-plan` es input de Stage 03 junto al guion, por lo que cambios semánticos del plan/config invalidan el fingerprint TTS. No hay reutilización selectiva en esta fase.
+
+### Outputs, provenance y estados
+
+El manifiesto inicial v1 se escribe en `workspace.manifest_dir/run-<uuid>/manifest.json`, con todas las etapas `pending`, `attempts: 0`. Después de publicar/verificar `validated-plan`, Stage 01 pasa a `completed` y el checkpoint del manifiesto se persiste antes de iniciar TTS. Stage 03 solo pasa a `completed` tras salida exitosa del worker, verificación de WAV/provenance, reread y hash SHA-256 de ambos archivos, comprobación de inputs sin cambios y persistencia/verificación del manifiesto final.
+
+La provenance productiva lleva `record_type: productive-local-kokoro-tts`, `provenance_version: 1`, run/project/stage IDs, provider/voice/language, formatos solicitados y efectivos, hashes de guion/WAV/validated-plan, `runtime` y `assets`. `runtime` registra Python y seis distributions observados por el worker, worker SHA-256 y proveedores ONNX efectivos. `assets.model` y `assets.voices` registran nombre de archivo, tamaño y SHA-256; `version_identity` repite ese digest con prefijo `sha256:`. `tool_versions.kokoro` guarda los mismos identificadores runtime/assets en JSON compacto canonicalizado. No se infieren versiones semánticas de los nombres de los assets.
+
+Stage 01 completado registra el hash releído de validated-plan. Stage 03 completado registra hashes leídos después de publicar narration y provenance. Etapas fallidas/bloqueadas no afirman artefactos reutilizables; una falla del worker deja Stage 01 completed y Stage 03 failed. En éxito, 02/04/05/06 permanecen pending. `validate-manifest` comprueba estructura, fingerprints, hashes y vuelve a comparar semánticamente validated-plan con la config, storyboard, recursos y DAG actuales; no vuelve a ejecutar ni autenticar el runtime.
+
+El runner es serial: una llamada al adaptador, sin retries ni resume. Un crash conserva el último checkpoint durable; archivos huérfanos nunca se adoptan automáticamente. Una invocación nueva exige rutas de outputs libres; los outputs existentes causan colisión y no se sobrescriben. La recuperación es manual: inspeccionar manifiesto/archivos y usar un proyecto o rutas de salida nuevas expresamente configuradas.
+
 ## Manifiesto, huellas y reanudación
 
 El manifiesto independiente usa `manifest_version: 1`, un UUID de ejecución, ID del proyecto, fecha ISO-8601 con zona horaria, huellas SHA-256 de configuración e inputs, y un registro por etapa. Cada registro contiene `status` (`pending`, `completed`, `failed`, `blocked`), `attempts`, `error`, `depends_on`, `artifacts`, `stage_fingerprint` y versiones reales de herramientas. El validador comprueba IDs/dependencias, límites de intentos, estados compatibles, huellas, rutas y hashes de artefactos terminados. Un estado `completed` también exige que el adaptador de etapa esté implementado y que cada herramienta requerida esté declarada `verified` y tenga adaptador implementado; esos valores son declaraciones del contrato, no una inspección del runtime por `validate-manifest`.
 
-En la reanudación futura, una etapa solo puede reutilizarse si su huella recalculada coincide, sus entradas y dependencias no cambiaron y cada salida declarada existe con el mismo SHA-256. La huella de etapa incluye su configuración, perfil, hashes de entrada, requisitos de herramienta y versiones efectivamente usadas. Una diferencia invalida esa etapa y sus descendientes; etapas independientes cuyos fingerprints coincidan pueden conservarse. Los estados y artefactos parciales de una etapa fallida no son reutilizables. Si cambia el input o configuración, el manifiesto conserva procedencia, pero la etapa afectada no se marca como completada válida.
+La reanudación selectiva descrita por el campo `retry_policy` no está implementada. Phase 4B siempre crea `run_id` nuevo, no reutiliza etapas completadas anteriores, no reintenta y no reanuda una ejecución interrumpida. Los fingerprints y hashes se validan para detectar consistencia; no son una función de resume.
 
-En v0.5 `validate-manifest` valida un manifiesto ya existente. No crea ejecuciones, no reanuda tareas y no escribe manifiestos. La CLI tampoco puede producir estados `completed` por sí misma.
+`validate-manifest` valida un manifiesto ya existente y es de solo lectura. No crea ejecuciones, no reanuda tareas y no cambia estados. `run-productive-tts` es el único comando actual que escribe un manifiesto con stages completed, limitado a Stage 01 y Stage 03 del perfil aprobado.
 
 ## Seguridad y recursos
 
-- Los cuatro comandos originales y `simulate-tts` son de solo lectura. `save-tts-simulation` publica solo el mock; `run-tts-kokoro` ejecuta el worker fijo y publica la narración local independiente del DAG. Ninguno acepta comandos desde JSON; Kokoro usa `subprocess` con `shell=False`, timeout y proveedor CPU explícito. No se invocan APIs ni descargadores.
+- `validate`, `plan`, `dry-run`, `validate-manifest` y `simulate-tts` son de solo lectura. `save-tts-simulation` publica solo el mock; `run-tts-kokoro` publica narración standalone; `run-productive-tts` escribe outputs y manifest v1 de Stage 01/03. Ambos runners reales invocan el mismo worker fijo con `subprocess`, `shell=False`, timeout y CPU provider; JSON no controla comandos. No se invocan APIs ni descargadores conocidos.
 - La validación resuelve rutas y verifica confinamiento incluso frente a symlinks; inputs externos o absolutos quedan fuera del contrato.
-- `.pipeline/` separa estado temporal, intermedios y artefactos locales de los archivos versionados. La fase 2B publica el mock bajo `.pipeline/simulations/tts/`; el piloto Kokoro publica audio real bajo `.pipeline/tts-local-runs/`. Ninguno satisface ni altera las salidas productivas del contrato.
+- `.pipeline/` separa estado temporal, intermedios y artefactos locales de los archivos versionados. Phase 2B publica mock bajo `.pipeline/simulations/tts/`; el piloto standalone publica audio bajo `.pipeline/tts-local-runs/`; el runner productivo escribe outputs configurados y manifiestos bajo `.pipeline/runs/` (o `workspace.manifest_dir` declarado).
 - Concurrencia inicial 1, dos hilos y presupuestos de 8 GB RAM/3 GB VRAM dejan margen al sistema en un equipo con 16 GB y GTX 1650 de 4 GB. El plan no mide consumo real.
 - Blender: la plantilla y el ejemplo declaran `>=4.0,<6.0` como rango de planificación para incluir la versión de referencia conocida 5.2.3. Ni esta compatibilidad ni la instalación 5.2.3 se verificaron en esta ejecución; comprobar versión y procedencia localmente antes de implementar el adaptador. Comprobar también runtime/modelo Kokoro, dependencias bloqueadas de Remotion y build de FFmpeg. Registrar versiones efectivas en el manifiesto; no inferirlas de los nombres declarados aquí.
 - Los futuros adaptadores deben recibir argumentos estructurados y rutas ya validadas, sin shell, y declarar timeout, límites de recursos y salidas verificables.
 
 ## Capacidades y límites
 
-Implementado: validación del contrato y recursos requeridos, storyboard existente, grafo DAG, orden/olas deterministas, vista previa de solo lectura, validación estructural del manifiesto, contrato TTS declarativo compatible con la etapa heredada, simulación TTS `mock` en memoria (fase 2A), publicación local verificada de los artefactos simulados (fase 2B) y comando `run-tts-kokoro` que ejecuta voz real como piloto local independiente del DAG. Planificar, simular, publicar un mock o ejecutar ese piloto no equivale a completar una etapa productiva.
+Implementado: validación del contrato/recursos/storyboard, DAG y olas deterministas, validación de manifiesto v1, simulación mock, publicación local de mock, piloto Kokoro standalone (`run-tts-kokoro`) y ejecución TTS productiva limitada (`run-productive-tts`). El runner productivo publica/verifica Stage 01 + Stage 03, provenance y checkpoints de manifest v1. No es un executor genérico.
 
-Pendiente: integrar la ejecución TTS al DAG productivo, publicar las salidas productivas declaradas por TTS o marcar etapas como completadas; preparar/renderizar escenas con Blender, componer video con Remotion, finalizar medios con FFmpeg, QA audiovisual, reintentos, escritura/recuperación de manifiestos y paralelismo real. Kokoro no actualiza manifiestos ni estados del DAG; Blender, Remotion y FFmpeg siguen sin ejecutores productivos.
+Pendiente: ejecución productiva de escenas con Blender, composición con Remotion, finalización con FFmpeg y QA audiovisual. No hay reintentos, resume, adopción de huérfanos ni paralelismo ejecutable. `run-tts-kokoro` sigue sin actualizar manifiestos; `run-productive-tts` sí actualiza manifiesto y completa solo Stage 01/03. Las etapas 02/04/05/06 permanecen pendientes.
