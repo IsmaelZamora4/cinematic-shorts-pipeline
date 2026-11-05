@@ -180,7 +180,7 @@ class ProductiveTtsExecutionTests(unittest.TestCase):
 
     def args(self):
         return {
-            "python_path": sys.executable,
+            "python_path": str(Path(sys.executable).resolve()),
             "model_path": str(self.model_path.resolve()),
             "voices_path": str(self.voices_path.resolve()),
         }
