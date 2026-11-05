@@ -368,7 +368,7 @@ class ProductiveTtsExecutionTests(unittest.TestCase):
         with mock.patch.object(subprocess, "run", side_effect=self.fake_worker()), contextlib.redirect_stdout(output):
             result = pipeline.main([
                 "run-productive-tts", str(self.config_path),
-                "--python", sys.executable,
+                "--python", self.args()["python_path"],
                 "--model", str(self.model_path.resolve()),
                 "--voices", str(self.voices_path.resolve()),
             ])
