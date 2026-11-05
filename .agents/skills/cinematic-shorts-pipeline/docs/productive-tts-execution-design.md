@@ -1,9 +1,9 @@
 # Phase 4A — Diseño de ejecución productiva de TTS
 
-**Estado:** especificación para revisión; no implementada  
-**Fecha:** 2026-11-05  
-**Base revisada:** commit 0694b0e083af1bc9fa53d82d57df8b373d5bc0a6  
-**Rama de diseño:** design/productive-tts-execution-v0.10  
+**Estado:** especificación para revisión; no implementada
+**Fecha:** 2026-11-05
+**Base revisada:** commit 0694b0e083af1bc9fa53d82d57df8b373d5bc0a6
+**Rama de diseño:** design/productive-tts-execution-v0.10
 **PR #11:** fusionado el 2026-11-05; merge commit 0694b0e083af1bc9fa53d82d57df8b373d5bc0a6
 
 ## Decisiones aprobadas antes de Phase 4B
@@ -328,4 +328,3 @@ Phase 4B se puede declarar completa solo cuando:
 Decisiones de pseudentrada pipeline-config y provenance/versiones ya aprobadas. Phase 4B implementa dos etapas, publicación sin overwrite, un intento, cero retries y cero resume. Phase 4C documentará capacidad final y evidencia CI. Mantener explícita la frontera standalone/productiva y los assets no incluidos.
 
 El diseño se releyó y contrastó con pipeline.py, worker, tests y contratos heredados. El código de Phase 4B aún no se implementa en esta revisión.
-
