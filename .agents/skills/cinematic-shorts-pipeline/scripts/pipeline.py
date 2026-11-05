@@ -583,6 +583,8 @@ def validate_config(data, config_path, captured_resources=None):
                 f"stage {TTS_NARRATION_STAGE_ID} must directly depend on 01-validate-project"
             )
         if tts_stage.get("adapter_status") == "implemented":
+            if dependencies != ["01-validate-project"]:
+                errors.append("productive 03-tts-narration must depend exclusively on 01-validate-project")
             validation_stage = by_id.get("01-validate-project", {})
             if validation_stage.get("adapter") != "builtin-validation" or validation_stage.get("adapter_status") != "implemented":
                 errors.append("productive 01-validate-project must use implemented builtin-validation")
@@ -606,6 +608,12 @@ def validate_config(data, config_path, captured_resources=None):
             kokoro_tool = tool_by_id.get("kokoro", {})
             if kokoro_tool.get("version_requirement") != "kokoro-onnx==0.6.1; Python>=3.10,<3.14; CPUExecutionProvider":
                 errors.append("productive Kokoro tool version_requirement must declare the supported runtime contract")
+            for audiovisual_stage_id in (
+                "02-blender-scenes", "04-remotion-compose", "05-ffmpeg-finalize", "06-quality-control",
+            ):
+                audiovisual_stage = by_id.get(audiovisual_stage_id, {})
+                if audiovisual_stage.get("adapter_status") != "pending":
+                    errors.append(f"productive profile requires {audiovisual_stage_id}.adapter_status to remain pending")
         script_path = project_resource_paths.get(VOICEOVER_SCRIPT_ID)
         if script_path is not None and script_path.is_file():
             script_content = _validate_voiceover_script(
@@ -1424,6 +1432,19 @@ def _productive_stage(config, stage_id):
     return next(stage for stage in config["stages"] if stage["id"] == stage_id)
 
 
+def _is_productive_tts_config(config):
+    stage = next(
+        (item for item in config.get("stages", []) if isinstance(item, dict) and item.get("id") == TTS_NARRATION_STAGE_ID),
+        None,
+    )
+    return (
+        isinstance(stage, dict)
+        and stage.get("adapter_status") == "implemented"
+        and isinstance(stage.get("tts"), dict)
+        and stage["tts"].get("provider") == "kokoro"
+    )
+
+
 def _productive_paths(root, stage):
     return {
         output["id"]: root.joinpath(*PurePosixPath(output["path"]).parts)
@@ -1749,7 +1770,8 @@ def run_productive_tts(config_path, *, python_path, model_path, voices_path):
             "dependencies": worker["versions"], "onnx_execution_providers": worker["worker_result"]["onnx_execution_providers"],
         }
         provenance = {
-            "provenance_version": 1, "run_id": run_id, "project_id": config["project"]["id"],
+            "provenance_version": 1, "record_type": "productive-local-kokoro-tts",
+            "run_id": run_id, "project_id": config["project"]["id"],
             "dag_stage_id": TTS_NARRATION_STAGE_ID, "provider": "kokoro-onnx", "voice": KOKORO_VOICE, "language": KOKORO_LANGUAGE,
             "requested_audio": dict(KOKORO_AUDIO), "audio": worker["audio"], "runtime": runtime,
             "assets": {"model": worker["model"], "voices": worker["voices"]},
@@ -1769,7 +1791,12 @@ def run_productive_tts(config_path, *, python_path, model_path, voices_path):
             audio_published = _inspect_kokoro_wav(wav_published)
             prov_published = _read_owned_file(stage03_paths["narration-provenance"], MAX_KOKORO_PROVENANCE_BYTES, tts_owned.get(stage03_paths["narration-provenance"]))
             parsed_provenance = STORYBOARD_VALIDATOR.parse_json(prov_published.decode("utf-8"))
-            if audio_published != worker["audio"] or parsed_provenance != provenance:
+            wav_published_sha256 = hashlib.sha256(wav_published).hexdigest()
+            if (
+                audio_published != worker["audio"]
+                or wav_published_sha256 != provenance["hashes"]["wav_sha256"]
+                or parsed_provenance != provenance
+            ):
                 raise ValueError("productive TTS outputs failed post-publication verification")
             if _productive_snapshot(config, config_path)[0] != input_hashes:
                 raise ValueError("project inputs changed during execution")
@@ -1787,9 +1814,17 @@ def run_productive_tts(config_path, *, python_path, model_path, voices_path):
         }}
         compact_tool_version = json.dumps(tool_identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         stage03_hashes = {"validated-plan": plan_hash, VOICEOVER_SCRIPT_INPUT: input_hashes[VOICEOVER_SCRIPT_INPUT]}
+        verified_output_hashes = {
+            "narration": wav_published_sha256,
+            "narration-provenance": hashlib.sha256(prov_published).hexdigest(),
+        }
         tts_artifacts = [
-            {"id": output_id, "path": next(item["path"] for item in stage03["outputs"] if item["id"] == output_id), "sha256": sha256_file(path)}
-            for output_id, path in stage03_paths.items()
+            {
+                "id": output_id,
+                "path": next(item["path"] for item in stage03["outputs"] if item["id"] == output_id),
+                "sha256": verified_output_hashes[output_id],
+            }
+            for output_id in stage03_paths
         ]
         manifest["stages"][TTS_NARRATION_STAGE_ID].update(
             status="completed", attempts=1, artifacts=tts_artifacts,
@@ -2081,6 +2116,35 @@ def validate_manifest(manifest, config, config_path, manifest_path):
                 calculated = stage_fingerprint(config, stage, input_hashes, tool_versions)
                 if calculated != declared_stage_fingerprint:
                     errors.append(f"{label}.stage_fingerprint is stale for current config, inputs, or tool versions")
+    if _is_productive_tts_config(config):
+        visual_stage_ids = {
+            "02-blender-scenes", "04-remotion-compose", "05-ffmpeg-finalize", "06-quality-control",
+        }
+        for stage_id in visual_stage_ids:
+            entry = stage_entries.get(stage_id)
+            if isinstance(entry, dict) and entry.get("status") != "pending":
+                errors.append(f"manifest.stages.{stage_id} must remain pending in the productive TTS profile")
+
+        validation_entry = stage_entries.get("01-validate-project")
+        if isinstance(validation_entry, dict) and validation_entry.get("status") == "completed":
+            plan_artifact = next((
+                artifact for artifact in validation_entry.get("artifacts", [])
+                if isinstance(artifact, dict) and artifact.get("id") == "validated-plan"
+            ), None)
+            if plan_artifact is not None:
+                plan_path = _path(root, plan_artifact.get("path"), "manifest validated-plan path", errors)
+                if plan_path is not None:
+                    try:
+                        if plan_path.stat().st_size > MAX_VALIDATED_PLAN_BYTES:
+                            raise ValueError("validated-plan exceeds its size limit")
+                        plan_bytes = plan_path.read_bytes()
+                        plan_errors = []
+                        waves = _topological_waves(config.get("stages", []), plan_errors)
+                        if plan_errors:
+                            raise ValueError("current pipeline graph is invalid")
+                        _verify_validated_plan(plan_bytes, config, config_path, waves)
+                    except (OSError, ValueError) as exc:
+                        errors.append(f"manifest validated-plan does not match current project semantics: {exc}")
     return errors, warnings
 
 
@@ -2164,7 +2228,17 @@ def _print_plan(config, waves):
                 print("  Independent graph stages; future parallel execution is possible within the configured limit.")
             else:
                 print("  Independent graph stages; serialized by the conservative concurrency limit.")
-    print("Production adapters are not executable; the TTS contract is declarative only.")
+    productive_tts = any(
+        stage.get("id") == TTS_NARRATION_STAGE_ID
+        and stage.get("adapter_status") == "implemented"
+        and isinstance(stage.get("tts"), dict)
+        and stage["tts"].get("provider") == "kokoro"
+        for stage in config["stages"]
+    )
+    if productive_tts:
+        print("Productive local TTS runs only via run-productive-tts; plan and dry-run remain read-only and do not probe runtime.")
+    else:
+        print("Production adapters are not executable; the TTS contract is declarative only.")
 
 
 def main(argv=None):

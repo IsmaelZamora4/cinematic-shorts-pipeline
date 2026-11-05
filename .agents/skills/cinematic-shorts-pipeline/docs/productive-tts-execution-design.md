@@ -82,7 +82,7 @@ Permitir 03-tts-narration con adapter_status=implemented solo cuando se cumpla t
 - adapter es tts-narration y tools contiene exactamente kokoro.
 - tts.voice=em_alex, tts.language=es y el audio solicitado es WAV mono PCM16 little-endian a 24 kHz, que es el contrato soportado por el worker actual.
 - script_input es resource-voiceover-script; el recurso existe, es required, tiene kind voiceover-script, está confinado al proyecto y pasa los límites UTF-8 vigentes.
-- 03-tts-narration depende directamente de 01-validate-project y declara exactamente narration (.wav) y narration-provenance (.json).
+- 03-tts-narration depende exclusivamente de 01-validate-project y declara exactamente narration (.wav) y narration-provenance (.json).
 - Para adapter_status=implemented, inputs de TTS incluyen resource-voiceover-script y validated-plan. Contratos neutrales pending anteriores conservan su lista de inputs actual.
 - La entrada tools de kokoro declara adapter_status=implemented, availability=verified y un version_requirement que corresponda a Kokoro ONNX 0.6.1, CPUExecutionProvider y el rango Python que admite el worker.
 - Las otras etapas mantienen sus adaptadores pendientes en el perfil de ejecución Phase 4.
@@ -179,7 +179,7 @@ Los estados blocked requieren reason no vacío y ningún artifact/tool_versions.
 - No publicar en .pipeline/tts-local-runs ni .pipeline/simulations/tts desde el comando productivo.
 - El manifiesto reside en workspace.manifest_dir/run-<uuid>/manifest.json. Todas las rutas de outputs se almacenan como paths POSIX relativos a project root tal como declara la configuración.
 - Artefacto WAV: validar RIFF/WAVE, PCM16, mono, 24000 Hz, frames/duración dentro de límites, señal finita y no silenciosa, clipping y SHA-256.
-- Sidecar: JSON estricto con provenance_version=1. Debe coincidir con el resultado worker, config TTS y hash del WAV reread; su propio SHA-256 se guarda en manifest, no dentro de sí mismo.
+- Sidecar: JSON estricto con provenance_version=1 y record_type=productive-local-kokoro-tts. Debe coincidir con el resultado worker, config TTS y SHA-256 del WAV releído; su propio SHA-256 se guarda en manifest, no dentro de sí mismo.
 - Validated-plan: JSON estricto, determinista y recalculable con el config/input snapshot. Su SHA-256 se guarda en manifest.
 
 ### Manifest v1
@@ -191,7 +191,8 @@ Usar exactamente los campos actuales:
 - Completada 01: artifacts=[{id:"validated-plan", path:<ruta configurada>, sha256:<hash reread>}], stage_fingerprint recalculada, tool_versions={}.
 - Completada 03: artifacts contiene narration y narration-provenance una vez cada uno con rutas configuradas y hashes post-write. tool_versions contiene únicamente kokoro como JSON compacto canonicalizado con claves ordenadas; incluye versiones observadas, worker_sha256, model_sha256, voices_sha256 y provider. Provenance conserva estructura JSON equivalente.
 - Bloqueada/fallida: artifacts vacíos; no se registran parciales como resultados reutilizables.
-- 02/04/05/06 quedan pending incluso si alguna dependencia ya terminó. validate_manifest no exige que una etapa pending tenga dependencias pendientes.
+- 02/04/05/06 permanecen pending en el perfil Phase 4B; validate_manifest los rechaza si aparecen en otro estado.
+- Para un manifest productivo, validate_manifest vuelve a generar y comparar semánticamente validated-plan contra config, storyboard, recursos y fingerprints actuales. Un hash de artefacto recalculado no autentica un recibo alterado. Los manifests v1 heredados mantienen su validación previa.
 - Validación final requiere todas las etapas exactly matching IDs configurados, Stage 03 depende de Stage 01, completadas tienen outputs exactos, archivos presentes/confinados/hash correcto, fingerprints actuales y tool versions exactas.
 
 La creación del directorio run exclusivo y los reemplazos atómicos del único archivo manifest reducen el riesgo de truncar JSON. Un temp-file sibling se escribe completamente, se flush/fsync cuando la plataforma lo permite y se renombra con os.replace dentro del nuevo directorio. El directorio por run evita reemplazar un manifest anterior. Esto garantiza visibilidad atómica de una versión de manifiesto en sistemas de archivos locales que implementen rename en el mismo volumen; no garantiza durabilidad ante corte eléctrico ni transacción entre outputs y manifest.
@@ -274,16 +275,16 @@ Pruebas unitarias/integración local con procesos worker sustituidos por fakes. 
 | Cross-platform | POSIX symlink tests; Windows junction y reparse tests; symlink omitido solo con WinError 1314 documentado |
 | Sin retries | timeout/error invokes worker una vez, no reintenta ni reutiliza manifiestos/output de corridas anteriores |
 
-Verificación Phase 4B: suite unittest local, 169 pruebas aprobadas y 3 skips por permisos de symlink en Windows; validate-skill.py, pipeline validate/dry-run heredados, cuatro storyboards y git diff --check pasan. CI del PR #12 pasó en Ubuntu 24.04, Ubuntu 26.04 y Windows 2025 en commit 23a8a7b. No se generó audio real.
+Verificación Phase 4B: suite unittest local, 176 pruebas aprobadas y 3 skips por permisos de symlink en Windows; validate-skill.py, pipeline validate/dry-run heredados, cuatro storyboards y git diff --check pasan. CI del PR #12 pasó en Ubuntu 24.04, Ubuntu 26.04 y Windows 2025 antes de esta ronda de auditoría; los nuevos checks multiplataforma quedan pendientes de repetir. No se generó audio real.
 
 ## 10. Archivos previstos para Phase 4B y 4C
 
 ### Phase 4B — implementada
 
-- scripts/pipeline.py: elegibilidad Kokoro, pseudoentrada pipeline-config, validated-plan determinista, comando run-productive-tts, publicación exclusiva, checkpoints manifest v1 y verificación final.
-- tests/test_productive_tts_execution.py: éxito, fallos, huellas, invalidación, manifiestos, publicación parcial, cambios concurrentes y recuperación sin resume.
+- scripts/pipeline.py: elegibilidad Kokoro, dependencia productiva exclusiva, pseudoentrada pipeline-config, validated-plan determinista y semánticamente revalidado, SHA-256 WAV post-write, provenance diferenciada, mensaje dry-run read-only correcto, publicación exclusiva y checkpoints manifest v1.
+- tests/test_productive_tts_execution.py: éxito, fallos, WAV PCM alterado con métricas iguales, recibo alterado con hashes recalculados, dependencias extra, estados audiovisuales, dry-run read-only, cambios concurrentes y recuperación sin resume.
 - scripts/tts-kokoro-worker.py: reutilizado sin cambios; la síntesis mantiene un único worker.
-- Regresión local Windows: 169 pruebas; 3 skips por permisos de symlink. Audio de integración sintético.
+- Regresión local Windows: 176 pruebas; 3 skips por permisos de symlink. Audio de integración sintético. CI debe repetirse tras esta ronda.
 
 ### Phase 4C — documentación y gates
 

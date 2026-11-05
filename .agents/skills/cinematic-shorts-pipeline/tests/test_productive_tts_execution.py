@@ -90,6 +90,20 @@ class ProductiveTtsContractTests(unittest.TestCase):
         _, errors, _, _ = pipeline.load_and_validate_config(self.config_path)
         self.assertTrue(any("validated-plan" in error for error in errors), errors)
 
+    def test_rejects_productive_tts_additional_dependency_before_worker(self):
+        tts = next(stage for stage in self.config["stages"] if stage["id"] == "03-tts-narration")
+        tts["depends_on"].append("02-blender-scenes")
+        self.write_config()
+        _, errors, _, _ = pipeline.load_and_validate_config(self.config_path)
+        self.assertTrue(any("depend exclusively" in error for error in errors), errors)
+
+    def test_productive_profile_rejects_implemented_audiovisual_stage(self):
+        stage = next(stage for stage in self.config["stages"] if stage["id"] == "02-blender-scenes")
+        stage["adapter_status"] = "implemented"
+        self.write_config()
+        _, errors, _, _ = pipeline.load_and_validate_config(self.config_path)
+        self.assertTrue(any("02-blender-scenes.adapter_status" in error for error in errors), errors)
+
     def test_pipeline_config_is_semantic_pseudo_input_and_only_allowed_on_stage_one(self):
         loaded, errors, _, _ = pipeline.load_and_validate_config(self.config_path)
         self.assertEqual([], errors)
@@ -221,6 +235,7 @@ class ProductiveTtsExecutionTests(unittest.TestCase):
         self.assertEqual(1, manifest["manifest_version"])
         self.assertEqual("completed", manifest["stages"]["01-validate-project"]["status"])
         self.assertEqual("completed", manifest["stages"]["03-tts-narration"]["status"])
+        self.assertEqual("productive-local-kokoro-tts", result["provenance"]["record_type"])
         for stage_id in ("02-blender-scenes", "04-remotion-compose", "05-ffmpeg-finalize", "06-quality-control"):
             self.assertEqual("pending", manifest["stages"][stage_id]["status"])
         errors, warnings = pipeline.validate_manifest_file(self.config_path, manifest_path)
@@ -237,6 +252,7 @@ class ProductiveTtsExecutionTests(unittest.TestCase):
         self.assertNotIn("generated_at", plan)
         self.assertEqual(hashlib.sha256(self.wav_bytes).hexdigest(), result["provenance"]["hashes"]["wav_sha256"])
         provenance = json.loads((self.root / ".pipeline" / "work" / "narration-provenance.json").read_text(encoding="utf-8"))
+        self.assertEqual("productive-local-kokoro-tts", provenance["record_type"])
         self.assertEqual(hashlib.sha256(self.model_path.read_bytes()).hexdigest(), provenance["assets"]["model"]["sha256"])
         self.assertEqual(hashlib.sha256(self.voices_path.read_bytes()).hexdigest(), provenance["assets"]["voices"]["sha256"])
         self.assertEqual("sha256:" + provenance["assets"]["model"]["sha256"], provenance["assets"]["model"]["version_identity"])
@@ -271,6 +287,62 @@ class ProductiveTtsExecutionTests(unittest.TestCase):
         self.assertEqual("failed", manifest["stages"]["03-tts-narration"]["status"])
         self.assertEqual([], manifest["stages"]["03-tts-narration"]["artifacts"])
 
+    def test_rejects_post_write_wav_pcm_change_with_matching_audio_metrics(self):
+        changed_wav = make_wav(samples=[-900, 1200] * 120)
+        self.assertNotEqual(self.wav_bytes, changed_wav)
+        self.assertEqual(pipeline._inspect_kokoro_wav(self.wav_bytes), pipeline._inspect_kokoro_wav(changed_wav))
+        original_write = pipeline._write_exclusive_file
+
+        def write_changed_audio(path, payload, owned):
+            if Path(path).name == "narration.wav":
+                payload = changed_wav
+            return original_write(path, payload, owned)
+
+        with mock.patch.object(subprocess, "run", side_effect=self.fake_worker()), mock.patch.object(
+            pipeline, "_write_exclusive_file", side_effect=write_changed_audio
+        ):
+            with self.assertRaisesRegex(ValueError, "post-publication verification"):
+                self.run_execution()
+        manifest = json.loads(self.manifest_path().read_text(encoding="utf-8"))
+        self.assertEqual("failed", manifest["stages"]["03-tts-narration"]["status"])
+        self.assertEqual([], manifest["stages"]["03-tts-narration"]["artifacts"])
+        self.assertFalse((self.root / ".pipeline" / "work" / "narration.wav").exists())
+
+    def test_validate_manifest_rejects_semantically_altered_validated_plan_with_recalculated_hashes(self):
+        with mock.patch.object(subprocess, "run", side_effect=self.fake_worker()):
+            result = self.run_execution()
+        manifest_path = Path(result["manifest_path"])
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        plan_path = self.root / ".pipeline" / "work" / "validated-plan.json"
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        plan["validation"]["storyboard"] = "FAIL"
+        tampered_bytes = (json.dumps(plan, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
+        plan_path.write_bytes(tampered_bytes)
+        plan_sha256 = hashlib.sha256(tampered_bytes).hexdigest()
+        manifest["stages"]["01-validate-project"]["artifacts"][0]["sha256"] = plan_sha256
+        tts = next(stage for stage in self.config["stages"] if stage["id"] == "03-tts-narration")
+        tts_entry = manifest["stages"]["03-tts-narration"]
+        script_sha256 = hashlib.sha256((self.root / "voiceover-script.txt").read_bytes()).hexdigest()
+        tts_entry["stage_fingerprint"] = pipeline.stage_fingerprint(
+            self.config, tts,
+            {"validated-plan": plan_sha256, "resource-voiceover-script": script_sha256},
+            tts_entry["tool_versions"],
+        )
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        errors, _ = pipeline.validate_manifest_file(self.config_path, manifest_path)
+        self.assertTrue(any("validated-plan does not match current project semantics" in error for error in errors), errors)
+
+    def test_validate_manifest_rejects_completed_audiovisual_state_for_productive_profile(self):
+        with mock.patch.object(subprocess, "run", side_effect=self.fake_worker()):
+            result = self.run_execution()
+        manifest_path = Path(result["manifest_path"])
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        visual = manifest["stages"]["02-blender-scenes"]
+        visual.update(status="blocked", error="unexpected visual execution state")
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        errors, _ = pipeline.validate_manifest_file(self.config_path, manifest_path)
+        self.assertTrue(any("02-blender-scenes must remain pending" in error for error in errors), errors)
+
     def test_rejects_existing_productive_output_without_overwrite_or_worker(self):
         output = self.root / ".pipeline" / "work" / "narration.wav"
         output.parent.mkdir(parents=True)
@@ -279,6 +351,16 @@ class ProductiveTtsExecutionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "already exists"):
                 self.run_execution()
         self.assertEqual(b"keep me", output.read_bytes())
+        self.assertFalse((self.root / ".pipeline" / "runs").exists())
+
+    def test_extra_tts_dependency_fails_before_worker_invocation(self):
+        tts = next(stage for stage in self.config["stages"] if stage["id"] == "03-tts-narration")
+        tts["depends_on"].append("02-blender-scenes")
+        self.write_config()
+        with mock.patch.object(subprocess, "run", side_effect=AssertionError("worker must not start")) as run:
+            with self.assertRaisesRegex(ValueError, "depend exclusively"):
+                self.run_execution()
+        run.assert_not_called()
         self.assertFalse((self.root / ".pipeline" / "runs").exists())
 
     def test_rejects_script_change_during_inference(self):
@@ -375,6 +457,16 @@ class ProductiveTtsExecutionTests(unittest.TestCase):
         self.assertEqual(0, result)
         self.assertNotIn("A test voiceover script.", output.getvalue())
         self.assertIn("manifest_path", json.loads(output.getvalue()))
+
+    def test_productive_dry_run_message_is_truthful_and_remains_read_only(self):
+        output = io.StringIO()
+        with mock.patch.object(subprocess, "run", side_effect=AssertionError("dry-run must not launch worker")), contextlib.redirect_stdout(output):
+            result = pipeline.main(["dry-run", str(self.config_path)])
+        self.assertEqual(0, result)
+        self.assertIn("only via run-productive-tts", output.getvalue())
+        self.assertIn("remain read-only", output.getvalue())
+        self.assertNotIn("Production adapters are not executable", output.getvalue())
+        self.assertFalse((self.root / ".pipeline").exists())
 
 
 if __name__ == "__main__":
