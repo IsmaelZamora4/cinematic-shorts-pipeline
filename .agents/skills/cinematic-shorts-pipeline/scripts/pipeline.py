@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Validate and preview a local cinematic pipeline without executing adapters."""
+"""Validate, preview, and simulate TTS in memory without executing production adapters."""
 import argparse
 import hashlib
 import importlib.util
 import json
 import re
+import struct
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -27,6 +28,9 @@ TTS_PROVIDER_TO_TOOL = {"kokoro": "kokoro", "piper": "piper"}
 VOICEOVER_SCRIPT_ID = "voiceover-script"
 VOICEOVER_SCRIPT_INPUT = f"resource-{VOICEOVER_SCRIPT_ID}"
 MAX_VOICEOVER_SCRIPT_BYTES = 1024 * 1024
+MAX_MOCK_WAV_BYTES = 512 * 1024
+MOCK_DURATION_MS = 1000
+MOCK_AUDIO_COMMENT = b"SIMULATED MOCK SILENCE; NOT SPEECH"
 TTS_SAMPLE_RATES = {16000, 22050, 24000, 32000, 44100, 48000}
 TTS_SAMPLE_FORMATS = {"pcm_s16le", "pcm_s24le", "pcm_f32le"}
 TTS_VOICE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -138,19 +142,20 @@ def _validate_voiceover_script(path, label, errors):
             content = stream.read(MAX_VOICEOVER_SCRIPT_BYTES + 1)
     except OSError as exc:
         errors.append(f"{label} cannot be read: {exc}")
-        return
+        return None
     if len(content) > MAX_VOICEOVER_SCRIPT_BYTES:
         errors.append(f"{label} exceeds maximum size of {MAX_VOICEOVER_SCRIPT_BYTES} bytes")
-        return
+        return content
     try:
         text = content.decode("utf-8-sig", errors="strict")
     except UnicodeDecodeError:
         errors.append(f"{label} must contain valid UTF-8 text")
-        return
+        return content
     if not text.strip():
         errors.append(f"{label} must not be empty or whitespace-only")
     if "\x00" in text:
         errors.append(f"{label} must not contain NUL characters")
+    return content
 
 
 def _validate_tts_contract(stage, label, project_resources, tool_ids, errors):
@@ -283,7 +288,7 @@ def _topological_waves(stages, errors):
     return waves
 
 
-def validate_config(data, config_path):
+def validate_config(data, config_path, captured_resources=None):
     """Return (errors, warnings, deterministic execution waves)."""
     errors, warnings = [], []
     if not _object(
@@ -530,9 +535,11 @@ def validate_config(data, config_path):
             )
         script_path = project_resource_paths.get(VOICEOVER_SCRIPT_ID)
         if script_path is not None and script_path.is_file():
-            _validate_voiceover_script(
+            script_content = _validate_voiceover_script(
                 script_path, "project.resources.voiceover-script", errors
             )
+            if captured_resources is not None and script_content is not None:
+                captured_resources[VOICEOVER_SCRIPT_ID] = script_content
     waves = _topological_waves(stages, errors)
 
     known_inputs = top_inputs | set(output_ids)
@@ -568,15 +575,183 @@ def validate_config(data, config_path):
     return errors, warnings, waves
 
 
-def load_and_validate_config(path):
+def load_and_validate_config(path, captured_resources=None):
     """Load a pipeline and return (config, errors, warnings, execution_waves)."""
     config_path = Path(path)
     try:
         data = _strict_load(config_path)
     except (OSError, UnicodeError, ValueError) as exc:
         return None, [f"cannot read pipeline JSON: {exc}"], [], []
-    errors, warnings, waves = validate_config(data, config_path)
+    errors, warnings, waves = validate_config(data, config_path, captured_resources)
     return data, errors, warnings, waves
+
+
+def _riff_chunk(chunk_id, content):
+    padding = b"\x00" if len(content) & 1 else b""
+    return chunk_id + struct.pack("<I", len(content)) + content + padding
+
+
+def _mock_silence_wav(audio):
+    """Create deterministic one-second silent RIFF/WAVE bytes for contract testing."""
+    sample_formats = {
+        "pcm_s16le": (1, 2, 1),
+        "pcm_s24le": (1, 3, 1),
+        "pcm_f32le": (3, 4, 3),
+    }
+    try:
+        format_code, sample_width, _ = sample_formats[audio["sample_format"]]
+        sample_rate = audio["sample_rate_hz"]
+        channels = audio["channels"]
+    except (KeyError, TypeError) as exc:
+        raise ValueError("mock backend received unsupported WAV parameters") from exc
+    if (
+        not isinstance(sample_rate, int) or isinstance(sample_rate, bool)
+        or sample_rate not in TTS_SAMPLE_RATES
+        or not isinstance(channels, int) or isinstance(channels, bool)
+        or channels not in {1, 2}
+    ):
+        raise ValueError("mock backend received invalid WAV parameters")
+
+    frames = sample_rate * MOCK_DURATION_MS // 1000
+    block_align = channels * sample_width
+    comment = MOCK_AUDIO_COMMENT + b"\x00"
+    software = b"cinematic-shorts-pipeline mock\x00"
+    info_size = 4 + sum(8 + len(content) + (len(content) & 1) for content in (comment, software))
+    chunk_sizes = [16, info_size, frames * block_align]
+    if format_code == 3:
+        chunk_sizes.insert(1, 4)
+    expected_size = 12 + sum(8 + size + (size & 1) for size in chunk_sizes)
+    if expected_size > MAX_MOCK_WAV_BYTES:
+        raise ValueError(f"mock WAV exceeds maximum size of {MAX_MOCK_WAV_BYTES} bytes")
+    data = bytes(frames * block_align)
+    fmt = struct.pack(
+        "<HHIIHH",
+        format_code,
+        channels,
+        sample_rate,
+        sample_rate * block_align,
+        block_align,
+        sample_width * 8,
+    )
+    chunks = [_riff_chunk(b"fmt ", fmt)]
+    if format_code == 3:
+        chunks.append(_riff_chunk(b"fact", struct.pack("<I", frames)))
+    info = b"INFO" + _riff_chunk(b"ICMT", MOCK_AUDIO_COMMENT + b"\x00")
+    info += _riff_chunk(b"ISFT", b"cinematic-shorts-pipeline mock\x00")
+    chunks.append(_riff_chunk(b"LIST", info))
+    chunks.append(_riff_chunk(b"data", data))
+    body = b"WAVE" + b"".join(chunks)
+    wav_bytes = b"RIFF" + struct.pack("<I", len(body)) + body
+    if len(wav_bytes) != expected_size:
+        raise ValueError("mock WAV size does not match its calculated RIFF size")
+    return wav_bytes
+
+
+SIMULATION_BACKENDS = {"mock": _mock_silence_wav}
+
+
+def _inspect_mock_wav(data):
+    """Read back and verify the RIFF/WAVE contract generated by the mock."""
+    if not isinstance(data, bytes) or len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+        raise ValueError("mock backend did not return RIFF/WAVE bytes")
+    if struct.unpack_from("<I", data, 4)[0] != len(data) - 8:
+        raise ValueError("mock WAV RIFF size does not match its byte length")
+    chunks = {}
+    offset = 12
+    while offset < len(data):
+        if len(data) - offset < 8:
+            raise ValueError("mock WAV contains a truncated RIFF chunk header")
+        chunk_id = data[offset:offset + 4]
+        size = struct.unpack_from("<I", data, offset + 4)[0]
+        start = offset + 8
+        end = start + size
+        if end > len(data):
+            raise ValueError("mock WAV contains a truncated RIFF chunk")
+        if chunk_id in chunks:
+            raise ValueError(f"mock WAV contains duplicate {chunk_id!r} chunks")
+        chunks[chunk_id] = data[start:end]
+        offset = end + (size & 1)
+    if offset != len(data) or b"fmt " not in chunks or b"data" not in chunks or b"LIST" not in chunks:
+        raise ValueError("mock WAV is missing required RIFF chunks")
+    if MOCK_AUDIO_COMMENT not in chunks[b"LIST"]:
+        raise ValueError("mock WAV is missing its simulation marker")
+    fmt = chunks[b"fmt "]
+    if len(fmt) != 16:
+        raise ValueError("mock WAV fmt chunk has an unsupported size")
+    format_code, channels, sample_rate, byte_rate, block_align, bits = struct.unpack("<HHIIHH", fmt)
+    format_by_bits = {(1, 16): "pcm_s16le", (1, 24): "pcm_s24le", (3, 32): "pcm_f32le"}
+    sample_format = format_by_bits.get((format_code, bits))
+    if sample_format is None or channels not in {1, 2} or sample_rate not in TTS_SAMPLE_RATES:
+        raise ValueError("mock WAV header has unsupported effective parameters")
+    sample_width = bits // 8
+    expected_block_align = channels * sample_width
+    if block_align != expected_block_align or byte_rate != sample_rate * expected_block_align:
+        raise ValueError("mock WAV byte rate or block alignment is inconsistent")
+    if len(chunks[b"data"]) % block_align:
+        raise ValueError("mock WAV data does not contain whole frames")
+    if any(chunks[b"data"]):
+        raise ValueError("mock WAV data is not digital silence")
+    frames = len(chunks[b"data"]) // block_align
+    duration_ms = frames * 1000 // sample_rate
+    if frames * 1000 != sample_rate * MOCK_DURATION_MS or duration_ms != MOCK_DURATION_MS:
+        raise ValueError("mock WAV is not exactly one second long")
+    if format_code == 3:
+        if chunks.get(b"fact") != struct.pack("<I", frames):
+            raise ValueError("mock float WAV fact chunk does not match its frame count")
+    elif b"fact" in chunks:
+        raise ValueError("mock PCM WAV must not contain a float fact chunk")
+    return {
+        "container": "wav",
+        "sample_rate_hz": sample_rate,
+        "channels": channels,
+        "sample_format": sample_format,
+    }, frames, duration_ms
+
+
+def simulate_tts(config_path, backend="mock"):
+    """Validate a generic TTS pipeline and return an in-memory simulation only."""
+    backend_function = SIMULATION_BACKENDS.get(backend)
+    if backend_function is None:
+        raise ValueError(f"unsupported simulation backend: {backend}")
+    captured_resources = {}
+    config, errors, _, _ = load_and_validate_config(config_path, captured_resources)
+    if errors:
+        raise ValueError("pipeline validation failed: " + "; ".join(errors))
+    stage = next(
+        (item for item in config["stages"] if item.get("id") == TTS_NARRATION_STAGE_ID),
+        None,
+    )
+    if stage is None:
+        raise ValueError(f"simulation requires {TTS_NARRATION_STAGE_ID}")
+    script_bytes = captured_resources.get(VOICEOVER_SCRIPT_ID)
+    if script_bytes is None:
+        raise ValueError("validated voiceover script bytes were not captured")
+
+    wav_bytes = backend_function(stage["tts"]["audio"])
+    if len(wav_bytes) > MAX_MOCK_WAV_BYTES:
+        raise ValueError(f"mock WAV exceeds maximum size of {MAX_MOCK_WAV_BYTES} bytes")
+    audio_effective, frames, duration_ms = _inspect_mock_wav(wav_bytes)
+    requested_audio = stage["tts"]["audio"]
+    if any(audio_effective[key] != requested_audio[key] for key in audio_effective):
+        raise ValueError("mock WAV effective parameters do not match the TTS contract")
+
+    provenance = {
+        "provenance_version": 1,
+        "simulation": True,
+        "backend": backend,
+        "provider_requested": stage["tts"]["provider"],
+        "provider_executed": None,
+        "voice": stage["tts"]["voice"],
+        "language": stage["tts"]["language"],
+        "audio": audio_effective,
+        "frames": frames,
+        "duration_ms": duration_ms,
+        "script_sha256": hashlib.sha256(script_bytes).hexdigest(),
+        "wav_sha256": hashlib.sha256(wav_bytes).hexdigest(),
+    }
+    summary = dict(provenance)
+    summary["wav_size_bytes"] = len(wav_bytes)
+    return {"summary": summary, "provenance": provenance, "wav_bytes": wav_bytes}
 
 
 def _input_fingerprint(config, config_path):
@@ -921,6 +1096,11 @@ def main(argv=None):
     manifest_parser = commands.add_parser("validate-manifest")
     manifest_parser.add_argument("config", help="pipeline JSON file")
     manifest_parser.add_argument("manifest", help="run manifest JSON file")
+    simulation_parser = commands.add_parser(
+        "simulate-tts", help="validate and simulate TTS entirely in memory; writes no files"
+    )
+    simulation_parser.add_argument("config", help="pipeline JSON file; its directory is the project root")
+    simulation_parser.add_argument("--backend", choices=sorted(SIMULATION_BACKENDS), required=True)
     args = parser.parse_args(argv)
 
     if args.command == "validate-manifest":
@@ -933,6 +1113,15 @@ def main(argv=None):
         print("PASS: run manifest structure, dependencies, fingerprints, and reusable artifacts")
         for warning in warnings:
             print(f"WARN: {warning}")
+        return 0
+
+    if args.command == "simulate-tts":
+        try:
+            result = simulate_tts(args.config, backend=args.backend)
+        except (OSError, ValueError) as exc:
+            print(json.dumps({"error": str(exc), "simulation": True}, ensure_ascii=False, sort_keys=True))
+            return 1
+        print(json.dumps(result["summary"], ensure_ascii=False, sort_keys=True, indent=2))
         return 0
 
     config, errors, warnings, waves = load_and_validate_config(args.config)

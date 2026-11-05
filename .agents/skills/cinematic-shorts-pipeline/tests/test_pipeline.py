@@ -604,6 +604,7 @@ class PipelineValidationTests(unittest.TestCase):
             ["plan", str(generic_config_path)],
             ["dry-run", str(generic_config_path)],
             ["validate-manifest", str(generic_config_path), str(generic_manifest_path)],
+            ["simulate-tts", str(generic_config_path), "--backend", "mock"],
         )
         original_builtin_open = builtins.open
         original_path_open = Path.open

@@ -24,6 +24,8 @@ Para cada storyboard ejecuta `python scripts/validate-storyboard.py ruta/al/stor
 
 Los proyectos pueden versionar un `pipeline.json` con `pipeline_version: 1`, independiente del storyboard. Valida con `python scripts/pipeline.py validate ruta/al/pipeline.json`; inspecciona el DAG sin ejecutar ni escribir con `plan` o `dry-run`; valida un manifiesto existente con `validate-manifest pipeline.json run-manifest.json`. Consulta `references/pipeline-orchestration.md` antes de editar ese contrato.
 
+Para probar el contrato neutral de voz, `python scripts/pipeline.py simulate-tts ruta/al/pipeline.json --backend mock` valida el pipeline, storyboard, dependencia narrativa y guion, y devuelve un WAV de silencio simulado y su procedencia **solo en memoria**. El comando siempre marca `simulation: true`, no revela el guion, no escribe archivos, no abre conexiones, no ejecuta procesos ni completa etapas productivas. No es un ejecutor TTS.
+
 Los captions usan intervalos `[start_ms, end_ms)`: solapes rechazados por defecto. Un solape intencional requiere `overlap_exception` no vacío en el caption que empieza después; documenta su motivo.
 
 Para enlazar voz y planos, `narrative_timing` es opcional en `schema_version: 1`: etiqueta el reloj como estimado o grabado y anota beats, pausas y cortes con anclas referidas a escenas. Con grabación real, usa su duración como reloj y vuelve a revisar captions. Las anclas no demuestran sincronía; no declares alineación palabra a palabra sin evidencia de alineador o revisión manual.
@@ -34,9 +36,9 @@ Guarda paquetes nuevos en `deliverables/<slug>/` con un brief/plan y `storyboard
 
 Implementado: guías de planificación, contratos opcionales de cinematografía y animación, rúbrica cualitativa, planificador DAG local y validación de contratos de pipeline/manifiesto. `pipeline.py plan` y `dry-run` muestran el grafo sin ejecutar etapas ni crear archivos. La validación de storyboard comprueba estructura y tiempos declarados; no valida cámara, actuación, existencia/compatibilidad de rigs ni calidad visual. El validador de manifiestos comprueba estados, huellas y salidas, pero no crea ni reanuda ejecuciones.
 
-Implementado también: contrato declarativo TTS en `pipeline_version: 1`, compatible con la etapa heredada `03-kokoro-narration`, con etapa neutral `03-tts-narration`, guion UTF-8 explícito, formato WAV acotado y salidas previstas de audio/procedencia. El proveedor listado solo identifica una opción conocida por el contrato; no demuestra instalación, verificación ni capacidad de ejecución. Consulta `references/pipeline-orchestration.md`.
+Implementado también: contrato declarativo TTS en `pipeline_version: 1`, compatible con la etapa heredada `03-kokoro-narration`, con etapa neutral `03-tts-narration`, guion UTF-8 explícito, formato WAV acotado y salidas previstas de audio/procedencia. La fase 2A añade exclusivamente `simulate-tts --backend mock`: construye un segundo de silencio WAV RIFF en memoria (PCM de 16/24 bits o IEEE float de 32 bits), verifica cabeceras, duración, tamaño y hashes y presenta un resumen JSON sin texto del guion. `kokoro` y `piper` siguen siendo proveedores declarativos; ninguno se ejecuta y el mock no puede completar etapas ni publicar los artefactos previstos. Consulta `references/pipeline-orchestration.md`.
 
-Las etapas audiovisuales y sus adaptadores ejecutables siguen pendientes. No hay generación de medios, motor de render, ejecutor TTS, composición, QA audiovisual temporal ni escáner legal. Los resultados de benchmarking, disponibilidad de assets, licencia, herramientas y compatibilidad se verifican por tarea.
+Las etapas audiovisuales y sus adaptadores ejecutables siguen pendientes. `simulate-tts` produce bytes WAV efímeros simulados en memoria, no un artefacto de producción. La fase 2B de publicación segura sigue pendiente; tampoco hay TTS real, motor de render, composición, QA audiovisual temporal ni escáner legal. No se imponen límites de CPU/RAM/VRAM, aislamiento de red ni timeout. Los resultados de benchmarking, disponibilidad de assets, licencia, herramientas y compatibilidad se verifican por tarea.
 
 ## Contexto local
 

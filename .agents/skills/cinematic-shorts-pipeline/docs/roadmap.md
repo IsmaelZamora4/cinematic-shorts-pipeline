@@ -66,15 +66,31 @@
 - El contrato neutral valida proveedor conocido (`kokoro` o `piper`), voz, idioma, parámetros WAV acotados, recurso de guion explícito y dos salidas futuras: WAV y JSON de procedencia.
 - `voiceover-script` debe ser recurso requerido, confinado, UTF-8 válido, no vacío y de hasta 1 MiB. Su hash participa en los fingerprints. No se usa texto de captions.
 - Se conserva el ejemplo legado de cueva y la plantilla original. `examples/tts-contract/` demuestra la configuración neutral; declara proveedor no verificado y adaptadores pendientes.
-- Sin ejecutor, TTS real, WAV, sidecar de procedencia, reintentos ni recuperación. Disponibilidad, licencias y versiones no se infieren de la allowlist.
+- Sin ejecución TTS productiva, WAV ni sidecar publicados, reintentos o recuperación. Disponibilidad, licencias y versiones no se infieren de la allowlist.
 
-**Estado:** implementado en `feature/production-adapters-v0.8`; pendiente de revisión e integración.
+**Estado:** integrado mediante PR #6 y squash `694d4c9de26b840af7794d08273f6d9b218a009c`.
 
-## Siguiente bloque — adaptadores de producción (futuro)
+## v0.8 — fase 2A: simulación TTS en memoria
+
+- Comando explícito `simulate-tts --backend mock`, separado de las cuatro órdenes originales de planificación/validación.
+- Validar pipeline, storyboard, dependencia TTS directa de `01-validate-project` y guion UTF-8 explícito; limitar lectura a 1 MiB y calcular el hash de los mismos bytes capturados.
+- Construir y verificar en memoria un segundo de silencio RIFF/WAVE PCM de 16/24 bits o IEEE float de 32 bits. Límite WAV: 512 KiB. Resumen JSON sin el texto privado del guion.
+- Procedencia en memoria con `simulation: true`, backend `mock`, proveedor solicitado, proveedor productivo no ejecutado, parámetros efectivos y hashes. No publicar archivos, llamar servicios, ejecutar herramientas ni completar etapas.
+- No imponer límites CPU/RAM/VRAM ni timeout; no afirmar aislamiento de red ni resistencia TOCTOU. El contrato y los fingerprints v1 permanecen intactos.
+
+**Estado:** implementación local en `feature/tts-executor-mock-v0.8-phase2`; pendiente de revisión. Sin TTS real ni artefactos publicados.
+
+## v0.8 — fase 2B: publicación segura (pendiente)
+
+- Diseñar y probar publicación de WAV y sidecar: temporales, validación del destino y promoción final con protección contra traversal, symlinks, colisiones y sustitución de rutas.
+- Definir limpieza de resultados parciales y límites efectivos que puedan imponerse en Windows y Ubuntu; analizar explícitamente carreras TOCTOU por plataforma.
+- Mantener separado este trabajo de reintentos, recuperación automática y TTS real. Ninguna de estas capacidades queda aprobada o implementada por fase 2A.
+
+## Siguiente bloque — adaptadores productivos (futuro)
 
 1. Verificar versiones locales, procedencia del modelo, licencia y requisitos del proveedor antes de implementar o declarar disponibilidad.
-2. Implementar un ejecutor explícito de un solo intento, con backend simulado y pruebas de fallos antes de integrar un TTS real. Aplicar límites efectivos de tiempo/tamaño y promover salidas validadas de forma atómica.
-3. Añadir persistencia y recuperación solo después de probar invalidación de entradas, configuración y dependencias; diseñar reintentos en una fase separada.
+2. Integrar un proveedor TTS real solo tras revisar la publicación segura de fase 2B y autorizar dicha integración.
+3. Añadir persistencia, recuperación e invalidación de descendientes en fases separadas; no añadir reintentos implícitos.
 4. Resolver rig/asset exacto y validar poses, apoyos, root motion, mirada, manos/props y continuidad en una secuencia autorizada.
 
 ## Pendiente de implementación
