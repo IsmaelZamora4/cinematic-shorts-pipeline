@@ -1,0 +1,55 @@
+{
+  "pipeline_version": 1,
+  "project": {
+    "id": "tts-contract-example",
+    "storyboard": "storyboard.json",
+    "resources": [
+      {"id": "voiceover-script", "path": "voiceover-script.txt", "required": true, "kind": "voiceover-script"}
+    ]
+  },
+  "profile": {
+    "width": 540,
+    "height": 960,
+    "fps": 30,
+    "format": "mp4",
+    "limits": {"cpu_threads": 2, "memory_mb": 8192, "vram_mb": 3072, "max_parallel_stages": 1}
+  },
+  "workspace": {
+    "intermediate_dir": ".pipeline/work",
+    "artifact_dir": ".pipeline/artifacts",
+    "manifest_dir": ".pipeline/runs"
+  },
+  "retry_policy": {"max_attempts": 2, "retryable_errors": ["transient", "timeout", "resource-pressure"], "resume_policy": "fingerprint"},
+  "tools": [
+    {"id": "blender", "executable": "blender", "version_requirement": "not verified", "availability": "not_checked", "adapter_status": "pending"},
+    {"id": "piper", "executable": "piper", "version_requirement": "not verified", "availability": "not_checked", "adapter_status": "pending"},
+    {"id": "remotion", "executable": "remotion", "version_requirement": "not verified", "availability": "not_checked", "adapter_status": "pending"},
+    {"id": "ffmpeg", "executable": "ffmpeg", "version_requirement": "not verified", "availability": "not_checked", "adapter_status": "pending"}
+  ],
+  "stages": [
+    {"id": "01-validate-project", "adapter": "builtin-validation", "adapter_status": "implemented", "depends_on": [], "inputs": ["storyboard"], "outputs": [{"id": "validated-plan", "path": ".pipeline/work/validated-plan.json"}], "tools": []},
+    {"id": "02-blender-scenes", "adapter": "blender-scenes", "adapter_status": "pending", "depends_on": ["01-validate-project"], "inputs": ["storyboard", "validated-plan"], "outputs": [{"id": "scene-package", "path": ".pipeline/work/scenes.json"}], "tools": ["blender"]},
+    {
+      "id": "03-tts-narration",
+      "adapter": "tts-narration",
+      "adapter_status": "pending",
+      "depends_on": ["01-validate-project"],
+      "inputs": ["resource-voiceover-script"],
+      "outputs": [
+        {"id": "narration", "path": ".pipeline/work/narration.wav"},
+        {"id": "narration-provenance", "path": ".pipeline/work/narration-provenance.json"}
+      ],
+      "tools": ["piper"],
+      "tts": {
+        "provider": "piper",
+        "voice": "en_US-lessac-medium",
+        "language": "en-US",
+        "audio": {"container": "wav", "sample_rate_hz": 22050, "channels": 1, "sample_format": "pcm_s16le"},
+        "script_input": "resource-voiceover-script"
+      }
+    },
+    {"id": "04-remotion-compose", "adapter": "remotion-compose", "adapter_status": "pending", "depends_on": ["02-blender-scenes", "03-tts-narration"], "inputs": ["scene-package", "narration"], "outputs": [{"id": "composite", "path": ".pipeline/work/composite.mp4"}], "tools": ["remotion"]},
+    {"id": "05-ffmpeg-finalize", "adapter": "ffmpeg-finalize", "adapter_status": "pending", "depends_on": ["04-remotion-compose"], "inputs": ["composite"], "outputs": [{"id": "final-video", "path": ".pipeline/artifacts/final.mp4"}], "tools": ["ffmpeg"]},
+    {"id": "06-quality-control", "adapter": "quality-control", "adapter_status": "pending", "depends_on": ["05-ffmpeg-finalize"], "inputs": ["final-video"], "outputs": [{"id": "quality-report", "path": ".pipeline/artifacts/quality-report.json"}], "tools": []}
+  ]
+}

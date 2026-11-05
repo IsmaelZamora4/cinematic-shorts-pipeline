@@ -2,7 +2,7 @@
 
 ## Alcance y evidencia
 
-Revisión local de los validadores de storyboard y pipeline, el manifiesto, el DAG, los comandos CLI y el workflow. Se ejecutaron pruebas de regresión en Windows. No se ejecutaron motores audiovisuales, se instalaron dependencias ni se escribió un manifiesto de producción. Dos pruebas de symlink quedaron omitidas porque Windows no permitió crear enlaces; deben correr en CI Linux.
+Revisión local de los validadores de storyboard y pipeline, el manifiesto, el DAG, los comandos CLI, el contrato TTS y el workflow. Las pruebas cubren las etapas narrativa heredada y genérica, el recurso UTF-8, proveedores allowlist, objetos estrictos, fingerprints y el carácter de solo lectura de los cuatro comandos para ambas configuraciones. Se ejecutaron pruebas de regresión en Windows. No se ejecutaron motores audiovisuales, se instalaron dependencias ni se escribió un manifiesto de producción. Las dos pruebas de symlink quedaron omitidas porque Windows no permitió crear enlaces; deben correr en CI Linux.
 
 ## Hallazgos reproducibles corregidos
 
@@ -20,6 +20,9 @@ Las severidades son bajas porque los efectos se limitaban al proceso local de va
 
 - `validate`, `plan`, `dry-run` y `validate-manifest` se ejecutan en una prueba con apertura de escritura, operaciones comunes de creación/borrado/reemplazo, procesos externos y sockets bloqueados. También se comparan rutas y contenido de todos los archivos antes y después.
 - Las rutas de entrada/salida usan el helper de confinamiento del proyecto, que rechaza rutas absolutas, traversal, NUL y symlinks que escapan de la raíz. Las salidas se cotejan con inputs y entre sí para evitar sobrescrituras declaradas.
+- La etapa TTS genérica acepta solo `kokoro` y `piper` como nombres de proveedor registrados por el contrato. El registro no inspecciona ni ejecuta binarios. Los objetos TTS y WAV rechazan claves desconocidas, incluyendo comandos, argumentos, imports, rutas ejecutables, URLs y código.
+- `voiceover-script` exige recurso requerido, ruta confinada, archivo existente, UTF-8 válido y texto no vacío; lectura limitada a 1 MiB. Su hash entra al fingerprint de entradas y al fingerprint de etapa cuando se declara como input.
+- Tanto configuración TTS como manifiestos mantienen `pipeline_version: 1` y `manifest_version: 1`. Las configuraciones y manifiestos heredados preservan sus IDs y se validan sin reescritura.
 - Los DAGs producen olas ordenadas por ID independientemente del orden de declaración. Las etapas completadas requieren dependencias completas, salidas configuradas exactas, hashes correctos y fingerprints actuales.
 - El parser JSON compartido limita anidamiento a 128 niveles antes de invocar `json.loads()` y rechaza sustitutos Unicode aislados antes de que una serialización UTF-8 o fingerprint falle.
 - CI mantiene `contents: read`, fija las actions oficiales a SHAs completos y solicita una matriz `ubuntu-24.04`/`ubuntu-26.04`.
@@ -27,11 +30,12 @@ Las severidades son bajas porque los efectos se limitaban al proceso local de va
 ## Riesgos y evidencia pendientes
 
 - La suite local en Windows omite las dos pruebas de symlink porque el sistema no permite crearlos. Quedan habilitadas en Linux; la matriz nueva todavía necesita una ejecución remota final para demostrar ambos runners.
-- No se fijó un límite de bytes para JSON ni para archivos que se leen al calcular SHA-256. No se reprodujo agotamiento de recursos con archivos grandes; definir límites requiere acordar tamaños máximos válidos para storyboards, manifiestos y artefactos.
-- No se probó una carrera que sustituya un symlink entre la resolución de ruta y la lectura de hash. Los comandos actuales no escriben artefactos; cualquier adaptador futuro debe volver a validar rutas justo antes de operar y evitar seguir enlaces durante aperturas de escritura.
+- No se fijó un límite de bytes para JSON ni para otros archivos que se leen al calcular SHA-256. El guion TTS sí está limitado a 1 MiB; otros recursos y artefactos siguen sin límite explícito.
+- No se probó una carrera que sustituya un symlink entre la resolución de ruta y lectura del guion/hash. Los comandos actuales son de solo lectura; cualquier ejecutor futuro debe volver a validar rutas justo antes de operar y evitar seguir enlaces durante aperturas de escritura.
 - `availability: verified` es una declaración del archivo de configuración. `validate-manifest` no inspecciona el binario ni demuestra compatibilidad del runtime; las versiones deben registrarse y verificarse por un adaptador futuro antes de reutilizar resultados.
-- No se revisó calidad de render, actuación, audio, licencias de recursos ni seguridad de adaptadores audiovisuales, porque esos adaptadores no existen y no se generaron medios.
+- Los IDs `kokoro` y `piper` son nombres aceptados por el contrato, no adaptadores TTS ejecutables. No se verificaron instalaciones, modelos, versiones, operación offline ni licencias; no se revisó calidad de audio y no se generaron medios.
+- No se comprobó que un runtime real admita todas las tasas, canales y formatos WAV declarables. El adaptador futuro deberá verificar los parámetros efectivos y registrar los valores reales, sin asumir que el proveedor los respeta.
 
 ## Próximos controles antes de ejecución
 
-Antes de implementar adaptadores, definir topes de tamaño/tiempo, verificar versiones reales, comprobar rutas con operaciones no-follow y añadir pruebas de fallo parcial e invalidación descendiente. La validación de un manifiesto no equivale a ejecutar ni a reanudar una tarea.
+Antes de ejecutar adaptadores, definir límites efectivos de tiempo/salida, verificar versiones y licencias, comprobar rutas con operaciones no-follow y añadir pruebas de fallo parcial e invalidación descendiente. Probar primero una interfaz de backend simulada; integrar un TTS real después de esa prueba. No declarar aislamiento de red ni presupuestos RAM/VRAM aplicados sin mecanismos que los impongan. La validación de un manifiesto no equivale a ejecutar ni a reanudar una tarea.

@@ -4,6 +4,12 @@ Mantén intercambiable el proveedor de voz: describe entradas y salidas en vez d
 
 No llames servicios de voz de pago, envíes guiones/audio privado ni descargues voces/modelos sin autorización explícita. Verifica la licencia del modelo antes de adoptarlo. Prefiere un proveedor local cuando cumpla los requisitos de calidad y ejecución.
 
+## Recurso TTS declarativo (pipeline v0.8, fase 1)
+
+La etapa neutral `03-tts-narration` requiere un recurso `voiceover-script` explícito, independiente de captions. El archivo debe ser UTF-8 válido, no vacío y de hasta 1 MiB. El validador no extrae ni reconstruye el guion desde captions. El bloque `tts` declara un proveedor conocido por el contrato, una voz, un idioma y WAV acotado; el nombre del proveedor no demuestra que esté instalado, verificado, licenciado o disponible para ejecutarse.
+
+La etapa heredada `03-kokoro-narration` y las configuraciones existentes siguen siendo válidas en modo planificación sin el nuevo recurso. La fase 1 no ejecuta TTS ni crea WAV o procedencia. Consulta [el contrato de pipeline](pipeline-orchestration.md#contrato-narrativo-tts-v08-fase-1) para el esquema y los límites exactos.
+
 ## Tiempo y mezcla
 
 Estima la duración de voz para planificar y usa el audio real para fijar los tiempos finales. Conserva pausas intencionales. Atenúa música bajo la voz cuando haga falta; revisa clipping, inteligibilidad, canales y fundidos. No afirmes que el tiempo por palabra es exacto salvo que un alineador lo mida o se compruebe manualmente.

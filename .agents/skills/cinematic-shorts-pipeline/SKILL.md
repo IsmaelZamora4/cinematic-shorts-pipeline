@@ -34,7 +34,9 @@ Guarda paquetes nuevos en `deliverables/<slug>/` con un brief/plan y `storyboard
 
 Implementado: guías de planificación, contratos opcionales de cinematografía y animación, rúbrica cualitativa, planificador DAG local y validación de contratos de pipeline/manifiesto. `pipeline.py plan` y `dry-run` muestran el grafo sin ejecutar etapas ni crear archivos. La validación de storyboard comprueba estructura y tiempos declarados; no valida cámara, actuación, existencia/compatibilidad de rigs ni calidad visual. El validador de manifiestos comprueba estados, huellas y salidas, pero no crea ni reanuda ejecuciones.
 
-Las etapas audiovisuales y sus adaptadores siguen pendientes. No hay generación de medios, motor de render, adaptador de TTS, composición, QA audiovisual temporal ni escáner legal. Los resultados de benchmarking, disponibilidad de assets, licencia, herramientas y compatibilidad se verifican por tarea.
+Implementado también: contrato declarativo TTS en `pipeline_version: 1`, compatible con la etapa heredada `03-kokoro-narration`, con etapa neutral `03-tts-narration`, guion UTF-8 explícito, formato WAV acotado y salidas previstas de audio/procedencia. El proveedor listado solo identifica una opción conocida por el contrato; no demuestra instalación, verificación ni capacidad de ejecución. Consulta `references/pipeline-orchestration.md`.
+
+Las etapas audiovisuales y sus adaptadores ejecutables siguen pendientes. No hay generación de medios, motor de render, ejecutor TTS, composición, QA audiovisual temporal ni escáner legal. Los resultados de benchmarking, disponibilidad de assets, licencia, herramientas y compatibilidad se verifican por tarea.
 
 ## Contexto local
 
