@@ -294,7 +294,7 @@ Automated checks validate declared structure and contracts. They do not judge st
 - **v0.8 — TTS contracts and mock publication:** merged through PRs [#6](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/pull/6), [#7](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/pull/7), and [#8](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/pull/8).
 - **v0.9 — Standalone Kokoro local pilot:** merged through [PR #9](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/pull/9). `run-tts-kokoro` remains separate from productive stages.
 - **v0.10 Phase 4A/4B — Productive local TTS:** approved design and productive Stage 01/03 implementation merged through [PR #12](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/pull/12), merge commit `aba0b4335062655291488b2ec128ee05922aff16`. Automated CI passed on Ubuntu 24.04, Ubuntu 26.04 and Windows 2025; one real local Kokoro inference was validated on Windows only.
-- **v0.10 Phase 4C — Documentation & Release Readiness:** documentation-only work under independent review; no audiovisual implementation or media generation.
+- **v0.10 Phase 4C — Documentation & Release Readiness:** documents the shipped TTS capability, its evidence, and release limits; no audiovisual implementation or media generation.
 - **Next:** plan and review audiovisual adapters separately. Blender, Remotion, FFmpeg and complete short generation remain unimplemented.
 
 See the [full roadmap](.agents/skills/cinematic-shorts-pipeline/docs/roadmap.md) for phase details.

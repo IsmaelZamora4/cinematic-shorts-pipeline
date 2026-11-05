@@ -1,10 +1,10 @@
 # Phase 4A — Diseño aprobado y evidencia de Phase 4B
 
-**Estado:** Phase 4B implementada, revisada y validada con una inferencia local real; PR #12 abierto; Phase 4C pendiente
+**Estado:** Phase 4B implementada, revisada, validada localmente y fusionada mediante PR #12; Phase 4C documental iniciada en PR #13
 **Fecha:** 2026-11-05
 **Código comprobado:** commit 5541f19315487721606499c4c2af8a2611e7a473
 **Rama de diseño:** design/productive-tts-execution-v0.10
-**PR #12:** mantener abierto; CI multiplataforma confirmado tras las correcciones de auditoría
+**PR #12:** fusionado mediante merge commit `aba0b4335062655291488b2ec128ee05922aff16`; CI multiplataforma confirmado tras las correcciones de auditoría
 
 ## Decisiones aprobadas antes de Phase 4B
 
@@ -345,6 +345,6 @@ Phase 4B conserva estos gates de aceptación; se verificaron en CI, y la ejecuci
 
 ## Recomendación
 
-Decisiones de pseudentrada pipeline-config y provenance/versiones aprobadas. Phase 4B implementa dos etapas, publicación sin overwrite, un intento, cero retries y cero resume. Recomendación: mantener PR #12 abierto hasta revisar esta evidencia y fusionar solo con aprobación explícita. No iniciar Phase 4C todavía. Mantener explícita la frontera standalone/productiva y los assets no incluidos.
+Decisiones de pseudentrada pipeline-config y provenance/versiones aprobadas. Phase 4B implementa dos etapas, publicación sin overwrite, un intento, cero retries y cero resume; quedó integrada en `main` mediante PR #12. Phase 4C documenta el estado y límites de v0.10, sin ampliar la ejecución audiovisual. PR #13 contiene esos cambios y permanece abierto para aprobación final. Mantener explícita la frontera standalone/productiva y los assets no incluidos.
 
-El diseño se contrastó con pipeline.py, el worker y los contratos heredados antes de implementar. Phase 4B conserva pipeline_version=1 y manifest_version=1. Phase 4C sigue pendiente; su alcance documentado permanece separado de esta validación local.
+El diseño se contrastó con pipeline.py, el worker y los contratos heredados antes de implementar. Phase 4B conserva pipeline_version=1 y manifest_version=1. Phase 4C ya comenzó como fase documental de release readiness v0.10; no implementa Blender, Remotion, FFmpeg ni etapas audiovisuales.

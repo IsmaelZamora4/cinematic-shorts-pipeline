@@ -123,12 +123,12 @@ El plan original proponía integrar el piloto Kokoro al DAG con persistencia/hue
 - 176 pruebas automatizadas ejecutadas localmente: 173 aprobadas y 3 skips por permisos de symlink Windows (`WinError 1314`). CI del head PR `cb323a0e419ee1a16912890a6e778b49afb89929` pasó en Ubuntu 24.04, Ubuntu 26.04 y Windows 2025. CI usa mocks y no hace inferencia real.
 - Una inferencia Kokoro real, solo en Windows local; no se hizo inferencia real en Ubuntu. Runtime, versiones, hashes y tiempos en [evidencia de Phase 4B](productive-tts-execution-design.md).
 
-#### Phase 4C — Documentation & Release Readiness v0.10 (en revisión)
+#### Phase 4C — Documentation & Release Readiness v0.10
 
 - Actualizar orquestación, seguridad, instrucciones de skill, README y roadmap para describir contratos/controles reales de Phase 4B.
 - Corregir afirmaciones históricas que describían TTS productivo como no implementado.
 - Mantener esta fase documental: sin cambios de código, audiovisual, runtime, assets ni generación de medios.
-- El PR independiente de Phase 4C requiere aprobación y no se fusiona automáticamente.
+- La fase actualiza la documentación de v0.10; no cambia el estado de los adaptadores audiovisuales ni afirma generación completa de video.
 
 ### Trabajo todavía pendiente
 
