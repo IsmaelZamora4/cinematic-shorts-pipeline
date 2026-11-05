@@ -1,6 +1,6 @@
 # Phase 4A — Diseño de ejecución productiva de TTS
 
-**Estado:** Phase 4A aprobada; Phase 4B implementada, suite local aprobada; CI multiplataforma pendiente
+**Estado:** Phase 4A aprobada; Phase 4B implementada; suite local y CI multiplataforma aprobados
 **Fecha:** 2026-11-05
 **Base revisada:** commit 0694b0e083af1bc9fa53d82d57df8b373d5bc0a6
 **Rama de diseño:** design/productive-tts-execution-v0.10
@@ -274,7 +274,7 @@ Pruebas unitarias/integración local con procesos worker sustituidos por fakes. 
 | Cross-platform | POSIX symlink tests; Windows junction y reparse tests; symlink omitido solo con WinError 1314 documentado |
 | Sin retries | timeout/error invokes worker una vez, no reintenta ni reutiliza manifiestos/output de corridas anteriores |
 
-Verificación local Phase 4B: suite unittest completa, 169 pruebas aprobadas y 3 skips por permisos de symlink en Windows; validate-skill.py, pipeline validate/dry-run heredados, cuatro storyboards y git diff --check pasan. No se generó audio real. CI de Ubuntu 24.04, Ubuntu 26.04 y Windows 2025 sigue pendiente de PR.
+Verificación Phase 4B: suite unittest local, 169 pruebas aprobadas y 3 skips por permisos de symlink en Windows; validate-skill.py, pipeline validate/dry-run heredados, cuatro storyboards y git diff --check pasan. CI del PR #12 pasó en Ubuntu 24.04, Ubuntu 26.04 y Windows 2025 en commit 23a8a7b. No se generó audio real.
 
 ## 10. Archivos previstos para Phase 4B y 4C
 
