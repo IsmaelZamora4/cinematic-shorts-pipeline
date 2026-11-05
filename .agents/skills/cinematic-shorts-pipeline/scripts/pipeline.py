@@ -13,14 +13,24 @@ from pathlib import Path, PurePosixPath
 
 PIPELINE_VERSION = 1
 MANIFEST_VERSION = 1
-STAGE_IDS = (
+REQUIRED_STAGE_IDS = (
     "01-validate-project",
     "02-blender-scenes",
-    "03-kokoro-narration",
     "04-remotion-compose",
     "05-ffmpeg-finalize",
     "06-quality-control",
 )
+LEGACY_NARRATION_STAGE_ID = "03-kokoro-narration"
+TTS_NARRATION_STAGE_ID = "03-tts-narration"
+NARRATION_STAGE_IDS = frozenset({LEGACY_NARRATION_STAGE_ID, TTS_NARRATION_STAGE_ID})
+TTS_PROVIDER_TO_TOOL = {"kokoro": "kokoro", "piper": "piper"}
+VOICEOVER_SCRIPT_ID = "voiceover-script"
+VOICEOVER_SCRIPT_INPUT = f"resource-{VOICEOVER_SCRIPT_ID}"
+MAX_VOICEOVER_SCRIPT_BYTES = 1024 * 1024
+TTS_SAMPLE_RATES = {16000, 22050, 24000, 32000, 44100, 48000}
+TTS_SAMPLE_FORMATS = {"pcm_s16le", "pcm_s24le", "pcm_f32le"}
+TTS_VOICE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+TTS_LANGUAGE = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
 STAGE_STATES = {"pending", "completed", "failed", "blocked"}
 RETRYABLE_ERRORS = {"transient", "timeout", "resource-pressure"}
 OUTPUT_FORMATS = {"mp4", "mov", "webm"}
@@ -121,6 +131,95 @@ def _path(root, value, label, errors, warnings=None, required_file=False):
     return candidate
 
 
+def _validate_voiceover_script(path, label, errors):
+    """Validate a bounded UTF-8 voiceover script without inferring captions."""
+    try:
+        with Path(path).open("rb") as stream:
+            content = stream.read(MAX_VOICEOVER_SCRIPT_BYTES + 1)
+    except OSError as exc:
+        errors.append(f"{label} cannot be read: {exc}")
+        return
+    if len(content) > MAX_VOICEOVER_SCRIPT_BYTES:
+        errors.append(f"{label} exceeds maximum size of {MAX_VOICEOVER_SCRIPT_BYTES} bytes")
+        return
+    try:
+        text = content.decode("utf-8-sig", errors="strict")
+    except UnicodeDecodeError:
+        errors.append(f"{label} must contain valid UTF-8 text")
+        return
+    if not text.strip():
+        errors.append(f"{label} must not be empty or whitespace-only")
+    if "\x00" in text:
+        errors.append(f"{label} must not contain NUL characters")
+
+
+def _validate_tts_contract(stage, label, project_resources, tool_ids, errors):
+    """Validate the declarative, non-executable TTS stage contract."""
+    tts = stage.get("tts")
+    tts_label = f"{label}.tts"
+    if not _object(tts, tts_label, ["provider", "voice", "language", "audio", "script_input"], [], errors):
+        return
+
+    provider = tts.get("provider")
+    provider_valid = _string(provider, f"{tts_label}.provider", errors, SLUG)
+    tool_id = TTS_PROVIDER_TO_TOOL.get(provider) if provider_valid else None
+    stage_tools = stage.get("tools") if isinstance(stage.get("tools"), list) else []
+    if tool_id is None:
+        errors.append(f"{tts_label}.provider is unsupported; expected one of {', '.join(sorted(TTS_PROVIDER_TO_TOOL))}")
+    elif stage_tools != [tool_id]:
+        errors.append(f"{label}.tools must contain exactly the registered provider tool {tool_id}")
+    if stage.get("adapter") != "tts-narration":
+        errors.append(f"{label}.adapter must be 'tts-narration'")
+    if stage.get("adapter_status") != "pending":
+        errors.append(f"{label}.adapter_status must remain 'pending'; no TTS executor is implemented")
+
+    _string(tts.get("voice"), f"{tts_label}.voice", errors, TTS_VOICE)
+    _string(tts.get("language"), f"{tts_label}.language", errors, TTS_LANGUAGE)
+    audio = tts.get("audio")
+    if _object(audio, f"{tts_label}.audio", ["container", "sample_rate_hz", "channels", "sample_format"], [], errors):
+        if audio.get("container") != "wav":
+            errors.append(f"{tts_label}.audio.container must be 'wav'")
+        sample_rate = audio.get("sample_rate_hz")
+        if _integer(sample_rate, f"{tts_label}.audio.sample_rate_hz", errors, 1) and sample_rate not in TTS_SAMPLE_RATES:
+            errors.append(f"{tts_label}.audio.sample_rate_hz must be one of {', '.join(map(str, sorted(TTS_SAMPLE_RATES)))}")
+        channels = audio.get("channels")
+        if _integer(channels, f"{tts_label}.audio.channels", errors, 1) and channels not in {1, 2}:
+            errors.append(f"{tts_label}.audio.channels must be 1 or 2")
+        sample_format = audio.get("sample_format")
+        if not isinstance(sample_format, str) or sample_format not in TTS_SAMPLE_FORMATS:
+            errors.append(f"{tts_label}.audio.sample_format must be one of {', '.join(sorted(TTS_SAMPLE_FORMATS))}")
+
+    script_input = tts.get("script_input")
+    if script_input != VOICEOVER_SCRIPT_INPUT:
+        errors.append(f"{tts_label}.script_input must be '{VOICEOVER_SCRIPT_INPUT}'")
+    stage_inputs = stage.get("inputs") if isinstance(stage.get("inputs"), list) else []
+    if script_input not in stage_inputs:
+        errors.append(f"{label}.inputs must include {VOICEOVER_SCRIPT_INPUT}")
+    resource = project_resources.get(VOICEOVER_SCRIPT_ID)
+    if resource is None:
+        errors.append(f"project.resources must declare required {VOICEOVER_SCRIPT_ID}")
+    else:
+        if resource.get("required") is not True:
+            errors.append(f"project.resources.{VOICEOVER_SCRIPT_ID}.required must be true")
+        if resource.get("kind") != VOICEOVER_SCRIPT_ID:
+            errors.append(f"project.resources.{VOICEOVER_SCRIPT_ID}.kind must be '{VOICEOVER_SCRIPT_ID}'")
+
+    stage_outputs = stage.get("outputs") if isinstance(stage.get("outputs"), list) else []
+    outputs = {
+        item.get("id"): item.get("path")
+        for item in stage_outputs
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    expected_outputs = {"narration": ".wav", "narration-provenance": ".json"}
+    if set(outputs) != set(expected_outputs):
+        errors.append(f"{label}.outputs must declare narration WAV and narration-provenance JSON outputs")
+    else:
+        for output_id, extension in expected_outputs.items():
+            output_path = outputs[output_id]
+            if not isinstance(output_path, str) or Path(output_path).suffix.lower() != extension:
+                errors.append(f"{label}.outputs.{output_id} path must end in {extension}")
+
+
 def _safe_relative(root, value, label, errors):
     return _path(root, value, label, errors)
 
@@ -198,6 +297,8 @@ def validate_config(data, config_path):
 
     root = Path(config_path).resolve().parent
     storyboard = None
+    project_resources = {}
+    project_resource_paths = {}
     project = data.get("project")
     if _object(project, "project", ["id", "storyboard", "resources"], [], errors):
         _string(project.get("id"), "project.id", errors, SLUG)
@@ -217,11 +318,14 @@ def validate_config(data, config_path):
             if resource_id in resource_ids:
                 errors.append(f"{label}.id duplicates {resource_id}")
             resource_ids.add(resource_id)
+            project_resources[resource_id] = resource
             if "kind" in resource:
                 _string(resource["kind"], f"{label}.kind", errors, SLUG)
             if not isinstance(resource.get("required"), bool):
                 errors.append(f"{label}.required must be a boolean")
             resource_path = _path(root, resource.get("path"), f"{label}.path", errors)
+            if resource_path is not None:
+                project_resource_paths[resource_id] = resource_path
             if resource_path is not None and not resource_path.is_file():
                 if resource.get("required") is True:
                     errors.append(f"required resource does not exist: {resource.get('path')}")
@@ -335,7 +439,7 @@ def validate_config(data, config_path):
     for index, stage in enumerate(stages):
         label = f"stages[{index}]"
         required = ["id", "adapter", "adapter_status", "depends_on", "inputs", "outputs", "tools"]
-        if not _object(stage, label, required, [], errors):
+        if not _object(stage, label, required, ["tts"], errors):
             continue
         stage_id = stage.get("id")
         if not _string(stage_id, f"{label}.id", errors, SLUG):
@@ -344,6 +448,10 @@ def validate_config(data, config_path):
         if stage_id in by_id:
             errors.append(f"duplicate stage id: {stage_id}")
         by_id[stage_id] = stage
+        if stage_id == TTS_NARRATION_STAGE_ID:
+            _validate_tts_contract(stage, label, project_resources, tool_ids, errors)
+        elif "tts" in stage:
+            errors.append(f"{label}.tts is only valid on {TTS_NARRATION_STAGE_ID}")
         _string(stage.get("adapter"), f"{label}.adapter", errors, SLUG)
         if not isinstance(stage.get("adapter_status"), str) or stage.get("adapter_status") not in {"pending", "implemented"}:
             errors.append(f"{label}.adapter_status must be 'pending' or 'implemented'")
@@ -404,9 +512,27 @@ def validate_config(data, config_path):
                 if not allowed:
                     errors.append(f"{output_label}.path must be under workspace.intermediate_dir or workspace.artifact_dir")
 
-    for required_id in STAGE_IDS:
+    for required_id in REQUIRED_STAGE_IDS:
         if required_id not in by_id:
             errors.append(f"missing required pipeline stage: {required_id}")
+    declared_narration_stages = NARRATION_STAGE_IDS.intersection(by_id)
+    if len(declared_narration_stages) != 1:
+        errors.append(
+            "pipeline must declare exactly one narration stage: "
+            f"{LEGACY_NARRATION_STAGE_ID} or {TTS_NARRATION_STAGE_ID}"
+        )
+    if TTS_NARRATION_STAGE_ID in declared_narration_stages:
+        tts_stage = by_id[TTS_NARRATION_STAGE_ID]
+        dependencies = tts_stage.get("depends_on")
+        if not isinstance(dependencies, list) or "01-validate-project" not in dependencies:
+            errors.append(
+                f"stage {TTS_NARRATION_STAGE_ID} must directly depend on 01-validate-project"
+            )
+        script_path = project_resource_paths.get(VOICEOVER_SCRIPT_ID)
+        if script_path is not None and script_path.is_file():
+            _validate_voiceover_script(
+                script_path, "project.resources.voiceover-script", errors
+            )
     waves = _topological_waves(stages, errors)
 
     known_inputs = top_inputs | set(output_ids)
@@ -763,6 +889,15 @@ def _print_plan(config, waves):
                 f"  {stage_id}: {state}; deps=[{dependencies}]; "
                 f"inputs=[{inputs}]; outputs=[{outputs}]; adapter={stage['adapter_status']}"
             )
+            tts = stage.get("tts")
+            if isinstance(tts, dict):
+                audio = tts["audio"]
+                print(
+                    "    TTS contract (declarative; runtime not probed): "
+                    f"provider={tts['provider']}; voice={tts['voice']}; language={tts['language']}; "
+                    f"audio={audio['container']}/{audio['sample_rate_hz']}Hz/"
+                    f"{audio['channels']}ch/{audio['sample_format']}; script={tts['script_input']}"
+                )
             for tool_id in stage["tools"]:
                 tool = tool_by_id[tool_id]
                 print(
@@ -774,7 +909,7 @@ def _print_plan(config, waves):
                 print("  Independent graph stages; future parallel execution is possible within the configured limit.")
             else:
                 print("  Independent graph stages; serialized by the conservative concurrency limit.")
-    print("Adapters for audiovisual production are planning-only and pending; no execution is available in v0.5.")
+    print("Production adapters are not executable; the TTS contract is declarative only.")
 
 
 def main(argv=None):

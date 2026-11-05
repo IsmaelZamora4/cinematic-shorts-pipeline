@@ -60,13 +60,23 @@
 
 **Verificación local y CI (2026-11-04):** localmente se ejecutaron 93 pruebas; 91 aprobadas y 2 omitidas en Windows por permisos de symlink. `validate-skill.py`, los cuatro storyboards de `examples/` y la plantilla, las dos configuraciones del pipeline, ambos `dry-run` y `git diff --check` pasaron. La suite conserva los storyboards anteriores y cubre el bloque `narrative_timing` válido/inválido, referencias temporales, cortes de transición y voz que cruza un corte; prueba que las cuatro operaciones CLI siguen siendo de solo lectura. GitHub Actions ejecutó las 93 pruebas sin omisiones ni fallos en Ubuntu 24.04 y 26.04 para el commit `69cb9c8134a8703a48d249fa6823b2a504b1a3d8` (run [41921199387](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/actions/runs/41921199387)); el squash integrado en `main` es `530188cc37c570939b58e5dfbc64190afb7df0f7`. No se creó ni reprodujo audio/video; no hay evidencia audiovisual de ritmo, sync, continuidad temporal ni claridad real.
 
+## v0.8 — Production Adapters: fase 1, contratos TTS
+
+- El validador acepta exactamente una etapa narrativa: `03-kokoro-narration` (heredada) o `03-tts-narration` (neutral). Conserva los IDs declarados, los contratos `pipeline_version: 1` y `manifest_version: 1`, y la validación de fingerprints/manifiestos anteriores.
+- El contrato neutral valida proveedor conocido (`kokoro` o `piper`), voz, idioma, parámetros WAV acotados, recurso de guion explícito y dos salidas futuras: WAV y JSON de procedencia.
+- `voiceover-script` debe ser recurso requerido, confinado, UTF-8 válido, no vacío y de hasta 1 MiB. Su hash participa en los fingerprints. No se usa texto de captions.
+- Se conserva el ejemplo legado de cueva y la plantilla original. `examples/tts-contract/` demuestra la configuración neutral; declara proveedor no verificado y adaptadores pendientes.
+- Sin ejecutor, TTS real, WAV, sidecar de procedencia, reintentos ni recuperación. Disponibilidad, licencias y versiones no se infieren de la allowlist.
+
+**Estado:** implementado en `feature/production-adapters-v0.8`; pendiente de revisión e integración.
+
 ## Siguiente bloque — adaptadores de producción (futuro)
 
-1. Verificar versiones locales, procedencia de recursos, licencias y requisitos de cada adaptador antes de declarar disponibilidad.
-2. Implementar invocación controlada sin shell, límites de tiempo/recursos, registro de versiones y salidas hash verificables.
-3. Resolver rig/asset exacto y validar poses, apoyos, root motion, mirada, manos/props y continuidad en una secuencia autorizada.
-4. Implementar persistencia y reanudación segura solo después de probar invalidación de entradas, configuración y dependencias.
+1. Verificar versiones locales, procedencia del modelo, licencia y requisitos del proveedor antes de implementar o declarar disponibilidad.
+2. Implementar un ejecutor explícito de un solo intento, con backend simulado y pruebas de fallos antes de integrar un TTS real. Aplicar límites efectivos de tiempo/tamaño y promover salidas validadas de forma atómica.
+3. Añadir persistencia y recuperación solo después de probar invalidación de entradas, configuración y dependencias; diseñar reintentos en una fase separada.
+4. Resolver rig/asset exacto y validar poses, apoyos, root motion, mirada, manos/props y continuidad en una secuencia autorizada.
 
 ## Pendiente de implementación
 
-No hay motor de render, adaptador TTS, alineador de subtítulos, descargador de assets, verificador legal automático ni QA audiovisual temporal. Los documentos de benchmark y rúbrica son protocolos, no resultados medidos.
+No hay ejecutor ni proveedor TTS, motor de render, alineador de subtítulos, descargador de assets, verificador legal automático ni QA audiovisual temporal. Los documentos de benchmark y rúbrica son protocolos, no resultados medidos.

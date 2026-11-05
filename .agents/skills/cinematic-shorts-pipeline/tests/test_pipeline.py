@@ -26,6 +26,55 @@ def load_pipeline():
 pipeline = load_pipeline()
 
 
+def make_tts_config(root, provider="piper"):
+    config = make_config(root)
+    legacy_stage = next(stage for stage in config["stages"] if stage["id"] == "03-kokoro-narration")
+    legacy_stage.update(
+        id="03-tts-narration",
+        adapter="tts-narration",
+        inputs=["resource-voiceover-script"],
+        outputs=[
+            {"id": "narration", "path": ".pipeline/work/narration.wav"},
+            {"id": "narration-provenance", "path": ".pipeline/work/narration-provenance.json"},
+        ],
+        tools=[provider],
+        tts={
+            "provider": provider,
+            "voice": "en_US-lessac-medium",
+            "language": "en-US",
+            "audio": {
+                "container": "wav",
+                "sample_rate_hz": 22050,
+                "channels": 1,
+                "sample_format": "pcm_s16le",
+            },
+            "script_input": "resource-voiceover-script",
+        },
+    )
+    compose = next(stage for stage in config["stages"] if stage["id"] == "04-remotion-compose")
+    compose["depends_on"] = ["02-blender-scenes", "03-tts-narration"]
+    if provider not in {tool["id"] for tool in config["tools"]}:
+        config["tools"].append(
+            {
+                "id": provider,
+                "executable": provider,
+                "version_requirement": "not verified",
+                "availability": "not_checked",
+                "adapter_status": "pending",
+            }
+        )
+    config["project"]["resources"] = [
+        {
+            "id": "voiceover-script",
+            "path": "voiceover-script.txt",
+            "required": True,
+            "kind": "voiceover-script",
+        }
+    ]
+    (Path(root) / "voiceover-script.txt").write_text("A test voiceover script.\n", encoding="utf-8")
+    return config
+
+
 def make_config(root, storyboard="storyboard.json"):
     stages = [
         {"id": "01-validate-project", "adapter": "builtin-validation", "adapter_status": "implemented", "depends_on": [], "inputs": ["storyboard"], "outputs": [{"id": "validated-plan", "path": ".pipeline/work/validated-plan.json"}], "tools": []},
@@ -81,6 +130,177 @@ class PipelineValidationTests(unittest.TestCase):
         self.assertEqual([], errors)
         self.assertEqual([], warnings)
         self.assertEqual(1, config["pipeline_version"])
+
+    def test_accepts_generic_tts_contract_with_declared_utf8_script(self):
+        self.config = make_tts_config(self.root)
+        self.write_config()
+        config, errors, warnings = self.errors()
+        self.assertEqual([], errors)
+        self.assertEqual([], warnings)
+        stage = next(stage for stage in config["stages"] if stage["id"] == "03-tts-narration")
+        self.assertEqual("piper", stage["tts"]["provider"])
+        self.assertIn("01-validate-project", stage["depends_on"])
+        self.assertEqual("not_checked", next(tool for tool in config["tools"] if tool["id"] == "piper")["availability"])
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(0, pipeline.main(["plan", str(self.config_path)]))
+        self.assertIn("TTS contract (declarative; runtime not probed)", output.getvalue())
+
+    def test_legacy_pipeline_does_not_apply_tts_utf8_rules_or_dependency(self):
+        script = self.root / "legacy-resource.bin"
+        script.write_bytes(b"\xfflegacy binary resource")
+        self.config["project"]["resources"] = [
+            {"id": "voiceover-script", "path": "legacy-resource.bin", "required": False}
+        ]
+        legacy_stage = next(stage for stage in self.config["stages"] if stage["id"] == "03-kokoro-narration")
+        legacy_stage["depends_on"] = []
+        legacy_stage["inputs"] = ["storyboard"]
+        self.write_config()
+        _, errors, warnings = self.errors()
+        self.assertEqual([], errors)
+        self.assertEqual([], warnings)
+
+    def test_rejects_both_narration_stage_ids(self):
+        self.config = make_tts_config(self.root)
+        legacy = make_config(self.root)["stages"][2]
+        self.config["stages"].append(legacy)
+        self.write_config()
+        _, errors, _ = self.errors()
+        self.assertTrue(any("exactly one narration stage" in error for error in errors), errors)
+
+    def test_rejects_missing_narration_stage(self):
+        self.config["stages"] = [stage for stage in self.config["stages"] if stage["id"] != "03-kokoro-narration"]
+        self.write_config()
+        _, errors, _ = self.errors()
+        self.assertTrue(any("exactly one narration stage" in error for error in errors), errors)
+
+    def test_rejects_generic_tts_stage_with_incorrect_composition_dependency(self):
+        self.config = make_tts_config(self.root)
+        compose = next(stage for stage in self.config["stages"] if stage["id"] == "04-remotion-compose")
+        compose["depends_on"] = ["02-blender-scenes", "03-kokoro-narration"]
+        self.write_config()
+        _, errors, _ = self.errors()
+        self.assertTrue(any("unknown dependency" in error for error in errors), errors)
+
+    def test_generic_tts_requires_direct_validation_dependency(self):
+        for dependencies in ([], ["02-blender-scenes"]):
+            with self.subTest(dependencies=dependencies):
+                self.config = make_tts_config(self.root)
+                tts_stage = next(stage for stage in self.config["stages"] if stage["id"] == "03-tts-narration")
+                tts_stage["depends_on"] = dependencies
+                self.write_config()
+                _, errors, _ = self.errors()
+                self.assertTrue(any("must directly depend on 01-validate-project" in error for error in errors), errors)
+
+    def test_generic_tts_does_not_require_direct_dependency_for_legacy_stage(self):
+        legacy_stage = next(stage for stage in self.config["stages"] if stage["id"] == "03-kokoro-narration")
+        legacy_stage["depends_on"] = []
+        legacy_stage["inputs"] = ["storyboard"]
+        self.write_config()
+        _, errors, _ = self.errors()
+        self.assertEqual([], errors)
+
+    def test_generic_tts_rejects_tools_other_than_registered_provider(self):
+        self.config = make_tts_config(self.root)
+        tts_stage = next(stage for stage in self.config["stages"] if stage["id"] == "03-tts-narration")
+        tts_stage["tools"] = ["piper", "ffmpeg"]
+        self.write_config()
+        _, errors, _ = self.errors()
+        self.assertTrue(any("must contain exactly the registered provider tool piper" in error for error in errors), errors)
+
+    def test_rejects_unregistered_tts_provider_and_executable_fields(self):
+        self.config = make_tts_config(self.root)
+        tts_stage = next(stage for stage in self.config["stages"] if stage["id"] == "03-tts-narration")
+        tts_stage["tts"]["provider"] = "unknown-provider"
+        for field in (
+            "command", "shell_args", "module", "import_path", "script_path",
+            "install_url", "download_url", "code",
+        ):
+            tts_stage["tts"][field] = "untrusted"
+        self.write_config()
+        _, errors, _ = self.errors()
+        self.assertTrue(any("provider" in error and "unsupported" in error for error in errors), errors)
+        for field in (
+            "command", "shell_args", "module", "import_path", "script_path",
+            "install_url", "download_url", "code",
+        ):
+            self.assertTrue(any(f"unknown field: {field}" in error for error in errors), errors)
+
+    def test_rejects_invalid_tts_audio_contract(self):
+        self.config = make_tts_config(self.root)
+        tts_stage = next(stage for stage in self.config["stages"] if stage["id"] == "03-tts-narration")
+        tts_stage["tts"]["audio"]["sample_rate_hz"] = 999999
+        tts_stage["tts"]["audio"]["unexpected"] = True
+        self.write_config()
+        _, errors, _ = self.errors()
+        self.assertTrue(any("sample_rate_hz" in error for error in errors), errors)
+        self.assertTrue(any("unknown field: unexpected" in error for error in errors), errors)
+
+    def test_rejects_missing_empty_invalid_or_oversized_voiceover_script(self):
+        self.config = make_tts_config(self.root)
+        script = self.root / "voiceover-script.txt"
+        cases = (
+            (None, "required resource does not exist"),
+            (b" \r\n\t", "must not be empty"),
+            (b"invalid utf-8: \xff", "valid UTF-8"),
+            (b"x" * (pipeline.MAX_VOICEOVER_SCRIPT_BYTES + 1), "exceeds maximum size"),
+        )
+        for value, expected in cases:
+            with self.subTest(expected=expected):
+                if value is None:
+                    script.unlink(missing_ok=True)
+                else:
+                    script.write_bytes(value)
+                self.write_config()
+                _, errors, _ = self.errors()
+                self.assertTrue(any(expected in error for error in errors), errors)
+                script.write_text("A test voiceover script.\n", encoding="utf-8")
+
+    def test_rejects_unsafe_voiceover_script_path(self):
+        self.config = make_tts_config(self.root)
+        self.config["project"]["resources"][0]["path"] = "../voiceover-script.txt"
+        self.write_config()
+        _, errors, _ = self.errors()
+        self.assertTrue(any("parent path segments" in error for error in errors), errors)
+
+    def test_generic_tts_requires_the_script_resource_contract(self):
+        for field, value, message in (
+            ("required", False, ".required must be true"),
+            ("kind", "text", ".kind must be 'voiceover-script'"),
+        ):
+            with self.subTest(field=field):
+                self.config = make_tts_config(self.root)
+                self.config["project"]["resources"][0][field] = value
+                self.write_config()
+                _, errors, _ = self.errors()
+                self.assertTrue(any(message in error for error in errors), errors)
+
+    def test_generic_tts_requires_declared_wav_and_provenance_outputs(self):
+        self.config = make_tts_config(self.root)
+        tts_stage = next(stage for stage in self.config["stages"] if stage["id"] == "03-tts-narration")
+        tts_stage["outputs"][1]["path"] = ".pipeline/work/narration-provenance.txt"
+        self.write_config()
+        _, errors, _ = self.errors()
+        self.assertTrue(any("narration-provenance path must end in .json" in error for error in errors), errors)
+
+    def test_voiceover_script_is_in_project_and_stage_fingerprints(self):
+        self.config = make_tts_config(self.root)
+        self.write_config()
+        stage = next(stage for stage in self.config["stages"] if stage["id"] == "03-tts-narration")
+        initial_input_fingerprint = pipeline._input_fingerprint(self.config, self.config_path)
+        input_hashes = pipeline._project_input_hashes(self.config, self.config_path)
+        self.assertIn("resource-voiceover-script", input_hashes)
+        initial_stage_fingerprint = pipeline.stage_fingerprint(
+            self.config, stage, {"resource-voiceover-script": input_hashes["resource-voiceover-script"]}, {}
+        )
+        (self.root / "voiceover-script.txt").write_text("Changed script.\n", encoding="utf-8")
+        changed_input_fingerprint = pipeline._input_fingerprint(self.config, self.config_path)
+        changed_hashes = pipeline._project_input_hashes(self.config, self.config_path)
+        changed_stage_fingerprint = pipeline.stage_fingerprint(
+            self.config, stage, {"resource-voiceover-script": changed_hashes["resource-voiceover-script"]}, {}
+        )
+        self.assertNotEqual(initial_input_fingerprint, changed_input_fingerprint)
+        self.assertNotEqual(initial_stage_fingerprint, changed_stage_fingerprint)
 
     def test_rejects_invalid_pipeline_version_and_unknown_fields(self):
         self.config["pipeline_version"] = True
@@ -356,6 +576,16 @@ class PipelineValidationTests(unittest.TestCase):
         manifest_path.write_text(
             json.dumps(pipeline.new_pending_manifest(self.config, self.config_path)), encoding="utf-8"
         )
+        generic_root = self.root / "generic"
+        generic_root.mkdir()
+        shutil.copyfile(ROOT / "templates" / "storyboard.json", generic_root / "storyboard.json")
+        generic_config = make_tts_config(generic_root)
+        generic_config_path = generic_root / "pipeline.json"
+        generic_config_path.write_text(json.dumps(generic_config, indent=2), encoding="utf-8")
+        generic_manifest_path = generic_root / "run-manifest.json"
+        generic_manifest_path.write_text(
+            json.dumps(pipeline.new_pending_manifest(generic_config, generic_config_path)), encoding="utf-8"
+        )
         def snapshot():
             return {
                 str(path.relative_to(self.root)): (
@@ -370,6 +600,10 @@ class PipelineValidationTests(unittest.TestCase):
             ["plan", str(self.config_path)],
             ["dry-run", str(self.config_path)],
             ["validate-manifest", str(self.config_path), str(manifest_path)],
+            ["validate", str(generic_config_path)],
+            ["plan", str(generic_config_path)],
+            ["dry-run", str(generic_config_path)],
+            ["validate-manifest", str(generic_config_path), str(generic_manifest_path)],
         )
         original_builtin_open = builtins.open
         original_path_open = Path.open
@@ -492,6 +726,29 @@ class RunManifestTests(unittest.TestCase):
         errors, warnings = pipeline.validate_manifest_file(self.config_path, self.manifest_path)
         self.assertEqual([], errors)
         self.assertEqual([], warnings)
+
+    def test_legacy_manifest_v1_keeps_legacy_stage_id_and_fingerprint(self):
+        self.assertEqual(1, self.manifest["manifest_version"])
+        self.assertIn("03-kokoro-narration", self.manifest["stages"])
+        errors, warnings = pipeline.validate_manifest_file(self.config_path, self.manifest_path)
+        self.assertEqual([], errors)
+        self.assertEqual([], warnings)
+
+    def test_generic_pending_manifest_v1_validates_without_claiming_execution(self):
+        generic_root = self.root / "generic"
+        generic_root.mkdir()
+        shutil.copyfile(ROOT / "templates" / "storyboard.json", generic_root / "storyboard.json")
+        generic_config = make_tts_config(generic_root)
+        generic_config_path = generic_root / "pipeline.json"
+        generic_config_path.write_text(json.dumps(generic_config, indent=2), encoding="utf-8")
+        generic_manifest_path = generic_root / "run-manifest.json"
+        generic_manifest = pipeline.new_pending_manifest(generic_config, generic_config_path)
+        generic_manifest_path.write_text(json.dumps(generic_manifest, indent=2), encoding="utf-8")
+        errors, warnings = pipeline.validate_manifest_file(generic_config_path, generic_manifest_path)
+        self.assertEqual([], errors)
+        self.assertEqual([], warnings)
+        self.assertEqual(1, generic_manifest["manifest_version"])
+        self.assertIn("03-tts-narration", generic_manifest["stages"])
 
     def test_validate_manifest_cli_reports_success_without_writing(self):
         before = sorted(str(path.relative_to(self.root)) for path in self.root.rglob("*"))
