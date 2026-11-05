@@ -27,7 +27,7 @@ La etapa genérica requiere `project.resources` con `id: "voiceover-script"`, `k
 
 La etapa declara exactamente dos artefactos futuros: `narration` con extensión `.wav` y `narration-provenance` con extensión `.json`. Las reglas comunes del pipeline verifican confinamiento bajo el workspace y ausencia de colisiones. El futuro sidecar usa `provenance_version: 1` e identifica proveedor, nombre/versión real del runtime, modelo/versión, voz, idioma, parámetros WAV efectivos, duración medida, SHA-256 del guion y SHA-256 del WAV. El hash del propio sidecar corresponde al artefacto registrado en el manifiesto; no se incluye a sí mismo. En fase 1 no se crea el sidecar ni se declaran valores medidos.
 
-Estos son contratos de planificación. No hay comando de ejecución, proveedor ejecutable, reintentos, recuperación ni reanudación TTS en fase 1. El ejemplo declara disponibilidad `not_checked` y adaptadores `pending`; las listas estáticas de proveedores no cambian esos estados.
+Estos son contratos de planificación. En fase 1 no había comando de ejecución ni proveedor ejecutable. El ejemplo declara disponibilidad `not_checked` y adaptadores `pending`; las listas estáticas de proveedores no cambian esos estados.
 
 La configuración ejemplo vive junto al storyboard que referencia en `examples/cave-exploration/pipeline.json`. `templates/pipeline.json` usa el storyboard plantilla ubicado en la misma carpeta. Edita una copia para cada proyecto.
 
@@ -57,6 +57,18 @@ python -B .agents/skills/cinematic-shorts-pipeline/scripts/pipeline.py dry-run .
 
 `plan` y `dry-run` muestran olas, orden, dependencias, entradas y salidas previstas, límites, herramientas y adaptadores. Una etapa viable aparece como `planned (not executed)`; una etapa con adaptador pendiente, herramienta no verificada o dependencia bloqueada aparece como `blocked`. El bloqueo se propaga a todos los descendientes. `availability: verified` es una declaración de configuración y no una comprobación del binario en esta ejecución. Ninguna etapa aparece como ejecutada o completada: estos comandos son de solo lectura y no lanzan Blender, Kokoro, Remotion ni FFmpeg.
 
+## Fase 2A: simulación TTS en memoria
+
+`python scripts/pipeline.py simulate-tts examples/tts-contract/pipeline.json --backend mock` es una orden explícita de simulación. No altera `pipeline_version: 1`, `manifest_version: 1`, los IDs, los fingerprints ni las dos salidas futuras del contrato. Valida la configuración, el storyboard, la dependencia directa `03-tts-narration -> 01-validate-project` y el recurso `voiceover-script`; lee como máximo 1 MiB y calcula SHA-256 sobre los mismos bytes capturados. No obtiene texto de captions.
+
+El único backend se llama `mock` y se registra en código. No se selecciona un proveedor productivo desde el argumento de backend: el proveedor configurado (`kokoro` o `piper`) solo aparece como solicitado; el campo `provider_executed` es nulo. El mock construye un segundo exacto de silencio digital en RIFF/WAVE en memoria, con marcador `SIMULATED MOCK SILENCE; NOT SPEECH`. Acepta PCM little-endian de 16 o 24 bits e IEEE float little-endian de 32 bits, comprueba parámetros efectivos, frames, duración, cabeceras y tamaño máximo de 512 KiB, y calcula SHA-256 del WAV. El proceso imprime únicamente el resumen JSON; el guion, WAV y objeto de procedencia completo permanecen en memoria y no se escriben en disco.
+
+La simulación no ejecuta etapas del DAG, no completa estados del manifiesto, no ejecuta Kokoro/Piper ni otras herramientas, no usa red o APIs y no genera medios productivos. No promete aislamiento de red, límites CPU/RAM/VRAM ni timeout. Los cuatro comandos originales (`validate`, `plan`, `dry-run`, `validate-manifest`) conservan su operación de solo lectura; `simulate-tts` también es de solo lectura y no crea archivos, procesos o conexiones.
+
+## Fase 2B: publicación segura (pendiente)
+
+La publicación de WAV y sidecar no está implementada. Sigue pendiente definir e implementar creación temporal, validación final de destino, publicación resistente a symlinks/colisiones/sustitución de rutas, limpieza de escrituras parciales y límites efectivos aplicables a dicha operación. La simulación en memoria no demuestra seguridad de escritura ni resuelve carreras TOCTOU, en particular en Windows.
+
 ## Manifiesto, huellas y reanudación
 
 El manifiesto independiente usa `manifest_version: 1`, un UUID de ejecución, ID del proyecto, fecha ISO-8601 con zona horaria, huellas SHA-256 de configuración e inputs, y un registro por etapa. Cada registro contiene `status` (`pending`, `completed`, `failed`, `blocked`), `attempts`, `error`, `depends_on`, `artifacts`, `stage_fingerprint` y versiones reales de herramientas. El validador comprueba IDs/dependencias, límites de intentos, estados compatibles, huellas, rutas y hashes de artefactos terminados. Un estado `completed` también exige que el adaptador de etapa esté implementado y que cada herramienta requerida esté declarada `verified` y tenga adaptador implementado; esos valores son declaraciones del contrato, no una inspección del runtime por `validate-manifest`.
@@ -76,6 +88,6 @@ En v0.5 `validate-manifest` valida un manifiesto ya existente. No crea ejecucion
 
 ## Capacidades y límites
 
-Implementado: validación del contrato y recursos requeridos, storyboard existente, grafo DAG, orden/olas deterministas, vista previa de solo lectura, validación estructural del manifiesto y contrato TTS declarativo con compatibilidad para la etapa heredada. Planificar no equivale a ejecutar.
+Implementado: validación del contrato y recursos requeridos, storyboard existente, grafo DAG, orden/olas deterministas, vista previa de solo lectura, validación estructural del manifiesto, contrato TTS declarativo compatible con la etapa heredada y simulación TTS `mock` en memoria (fase 2A). Planificar o simular no equivale a ejecutar una etapa productiva.
 
-Pendiente: preparar/renderizar escenas, ejecutar cualquier proveedor TTS, crear WAV o sidecar, componer video, finalizar medios, QA audiovisual, invocación de herramientas, reintentos, escritura/recuperación de manifiestos y paralelismo real. Ningún resultado de imagen, audio, modelo o video se ha creado para esta versión.
+Pendiente: preparar/renderizar escenas, ejecutar cualquier proveedor TTS, publicar WAV o sidecar, componer video, finalizar medios, QA audiovisual, invocación de herramientas, reintentos, escritura/recuperación de manifiestos y paralelismo real. La fase 2A crea bytes WAV simulados solo en memoria; no ha publicado ni generado audio de producción, imágenes, modelos o video.
