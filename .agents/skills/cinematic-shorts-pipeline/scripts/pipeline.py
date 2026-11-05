@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Validate and preview pipelines, simulate TTS in memory, and publish mock simulations only."""
+"""Validate and preview pipelines, simulate TTS, publish mock runs, and run local Kokoro pilots."""
 import argparse
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import stat
 import struct
+import subprocess
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -36,6 +38,22 @@ MOCK_DURATION_MS = 1000
 MOCK_AUDIO_COMMENT = b"SIMULATED MOCK SILENCE; NOT SPEECH"
 TTS_SIMULATION_DIRECTORY = (".pipeline", "simulations", "tts")
 TTS_SIMULATION_FILES = frozenset({"mock-narration.wav", "mock-provenance.json"})
+TTS_LOCAL_RUN_DIRECTORY = (".pipeline", "tts-local-runs")
+TTS_LOCAL_RUN_FILES = frozenset({"narration.wav", "narration-provenance.json"})
+KOKORO_RUNTIME_VERSION = "0.6.1"
+KOKORO_LANGUAGE = "es"
+KOKORO_VOICE = "em_alex"
+KOKORO_AUDIO = {
+    "container": "wav",
+    "sample_rate_hz": 24000,
+    "channels": 1,
+    "sample_format": "pcm_s16le",
+}
+MAX_KOKORO_SCRIPT_BYTES = 8192
+MAX_KOKORO_WAV_BYTES = 16 * 1024 * 1024
+MAX_KOKORO_DURATION_SECONDS = 300
+MAX_KOKORO_PROVENANCE_BYTES = 64 * 1024
+KOKORO_TIMEOUT_SECONDS = 300
 TTS_SAMPLE_RATES = {16000, 22050, 24000, 32000, 44100, 48000}
 TTS_SAMPLE_FORMATS = {"pcm_s16le", "pcm_s24le", "pcm_f32le"}
 TTS_VOICE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -787,13 +805,13 @@ def _inspect_path(path):
     return entry
 
 
-def _ensure_tts_simulation_directory(project_root):
-    """Create the fixed output path one directory at a time without following links."""
+def _ensure_project_output_directory(project_root, components):
+    """Create a fixed project-local output path without following existing links."""
     current = Path(project_root)
     root_stat = _inspect_path(current)
     if root_stat is None or not stat.S_ISDIR(root_stat.st_mode):
         raise ValueError(f"project root is not a directory: {current}")
-    for component in TTS_SIMULATION_DIRECTORY:
+    for component in components:
         current = current / component
         entry = _inspect_path(current)
         if entry is None:
@@ -806,6 +824,11 @@ def _ensure_tts_simulation_directory(project_root):
         if entry is None or not stat.S_ISDIR(entry.st_mode):
             raise ValueError(f"unsafe destination component is not a directory: {current}")
     return current
+
+
+def _ensure_tts_simulation_directory(project_root):
+    """Create the fixed mock destination using the shared safe path walk."""
+    return _ensure_project_output_directory(project_root, TTS_SIMULATION_DIRECTORY)
 
 
 def _write_exclusive_file(path, payload, owned_files):
@@ -850,12 +873,13 @@ def _remove_owned_file(path, identity):
         return False
 
 
-def _cleanup_tts_publication(run_dir, run_identity, owned_files):
+def _cleanup_tts_publication(run_dir, run_identity, owned_files, allowed_files=None):
     """Remove only verified files from this run and then its still-owned empty directory."""
     run_dir = Path(run_dir)
+    allowed_files = TTS_SIMULATION_FILES if allowed_files is None else allowed_files
     remaining = False
     for path, identity in owned_files.items():
-        if path.parent != run_dir or path.name not in TTS_SIMULATION_FILES:
+        if path.parent != run_dir or path.name not in allowed_files:
             remaining = True
             continue
         if not _remove_owned_file(path, identity):
@@ -965,6 +989,383 @@ def save_tts_simulation(config_path):
         provenance_path=str(run_dir / "mock-provenance.json"),
     )
     return {"summary": summary, "provenance": simulation["provenance"], "publication_dir": str(run_dir)}
+
+
+def _kokoro_stage(config_path):
+    """Validate a local Kokoro pilot contract and capture its exact script bytes."""
+    captured_resources = {}
+    config, errors, _, _ = load_and_validate_config(config_path, captured_resources)
+    if errors:
+        raise ValueError("pipeline validation failed: " + "; ".join(errors))
+    stage = next(
+        (item for item in config["stages"] if item.get("id") == TTS_NARRATION_STAGE_ID),
+        None,
+    )
+    if stage is None:
+        raise ValueError(f"local Kokoro execution requires {TTS_NARRATION_STAGE_ID}")
+    tts = stage["tts"]
+    if tts["provider"] != "kokoro":
+        raise ValueError("local Kokoro execution requires provider 'kokoro'")
+    if tts["voice"] != KOKORO_VOICE:
+        raise ValueError(f"local Kokoro pilot currently requires voice '{KOKORO_VOICE}'")
+    if tts["language"] != KOKORO_LANGUAGE:
+        raise ValueError(f"local Kokoro pilot currently requires language '{KOKORO_LANGUAGE}'")
+    if tts["audio"] != KOKORO_AUDIO:
+        raise ValueError("local Kokoro pilot requires WAV mono 24000 Hz pcm_s16le")
+    if stage.get("adapter_status") != "pending":
+        raise ValueError("local pilot does not change or complete the productive adapter status")
+    script_bytes = captured_resources.get(VOICEOVER_SCRIPT_ID)
+    if not isinstance(script_bytes, bytes):
+        raise ValueError("validated voiceover script bytes were not captured")
+    if len(script_bytes) > MAX_KOKORO_SCRIPT_BYTES:
+        raise ValueError(f"pilot script exceeds {MAX_KOKORO_SCRIPT_BYTES} bytes")
+    return config, stage, script_bytes
+
+
+def _hash_local_runtime_file(value, label, maximum_size):
+    """Hash one explicit local regular file after rejecting link/reparse components."""
+    if not isinstance(value, (str, os.PathLike)) or not str(value).strip():
+        raise ValueError(f"{label} path must be provided explicitly")
+    path = Path(value)
+    if not path.is_absolute():
+        raise ValueError(f"{label} path must be absolute")
+    current = Path(path.anchor)
+    parts = path.parts[1:]
+    for index, part in enumerate(parts):
+        current = current / part
+        entry = _inspect_path(current)
+        if entry is None:
+            raise ValueError(f"{label} file or parent does not exist: {current}")
+        is_leaf = index == len(parts) - 1
+        if is_leaf:
+            if not stat.S_ISREG(entry.st_mode):
+                raise ValueError(f"{label} is not a regular file: {current}")
+        elif not stat.S_ISDIR(entry.st_mode):
+            raise ValueError(f"{label} parent is not a regular directory: {current}")
+    entry = _inspect_path(path)
+    identity = _file_identity(entry) if entry is not None else None
+    if entry is None or identity is None:
+        raise ValueError(f"cannot verify filesystem identity for {label}: {path}")
+    if entry.st_size > maximum_size:
+        raise ValueError(f"{label} exceeds maximum size of {maximum_size} bytes")
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        if _file_identity(os.fstat(stream.fileno())) != identity:
+            raise ValueError(f"{label} identity changed while opening")
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+        final_stat = os.fstat(stream.fileno())
+    after = _inspect_path(path)
+    if (
+        after is None
+        or _file_identity(after) != identity
+        or _file_identity(final_stat) != identity
+        or final_stat.st_size != entry.st_size
+    ):
+        raise ValueError(f"{label} changed while hashing")
+    return path, digest.hexdigest(), entry.st_size
+
+
+def _inspect_kokoro_wav(data):
+    """Verify real Kokoro WAV structure, bounds, signal, and PCM clipping."""
+    if not isinstance(data, bytes) or len(data) < 44:
+        raise ValueError("Kokoro worker did not return a complete WAV")
+    if len(data) > MAX_KOKORO_WAV_BYTES:
+        raise ValueError(f"Kokoro WAV exceeds pilot maximum of {MAX_KOKORO_WAV_BYTES} bytes")
+    if data[:4] != b"RIFF" or data[8:12] != b"WAVE" or struct.unpack_from("<I", data, 4)[0] != len(data) - 8:
+        raise ValueError("Kokoro output has an invalid RIFF/WAVE header or size")
+    chunks = {}
+    offset = 12
+    while offset < len(data):
+        if len(data) - offset < 8:
+            raise ValueError("Kokoro WAV has a truncated RIFF chunk header")
+        chunk_id = data[offset:offset + 4]
+        chunk_size = struct.unpack_from("<I", data, offset + 4)[0]
+        start = offset + 8
+        end = start + chunk_size
+        if end > len(data) or chunk_id in chunks:
+            raise ValueError("Kokoro WAV has a truncated or duplicate RIFF chunk")
+        chunks[chunk_id] = data[start:end]
+        offset = end + (chunk_size & 1)
+    if offset != len(data) or b"fmt " not in chunks or b"data" not in chunks:
+        raise ValueError("Kokoro WAV is missing required RIFF chunks")
+    fmt = chunks[b"fmt "]
+    if len(fmt) < 16:
+        raise ValueError("Kokoro WAV fmt chunk is malformed")
+    audio_format, channels, sample_rate, byte_rate, block_align, bits = struct.unpack_from("<HHIIHH", fmt)
+    if (audio_format, channels, sample_rate, bits) != (1, 1, 24000, 16):
+        raise ValueError("Kokoro WAV must be mono PCM16 at 24000 Hz")
+    if block_align != 2 or byte_rate != 48000 or len(chunks[b"data"]) % block_align:
+        raise ValueError("Kokoro WAV PCM frame alignment is inconsistent")
+    pcm = chunks[b"data"]
+    frames = len(pcm) // block_align
+    duration_seconds = frames / sample_rate
+    if frames <= 0 or duration_seconds > MAX_KOKORO_DURATION_SECONDS:
+        raise ValueError("Kokoro WAV is empty or exceeds the pilot duration limit")
+    count = 0
+    peak = 0
+    sum_squares = 0
+    full_scale = 0
+    for (sample,) in struct.iter_unpack("<h", pcm):
+        count += 1
+        magnitude = abs(sample)
+        peak = max(peak, magnitude)
+        sum_squares += sample * sample
+        if sample in (-32768, 32767):
+            full_scale += 1
+    if count != frames or peak == 0:
+        raise ValueError("Kokoro WAV contains no non-silent PCM signal")
+    severe_clipping = full_scale > max(3, int(count * 0.001))
+    if severe_clipping:
+        raise ValueError("Kokoro WAV has severe digital clipping")
+    return {
+        "container": "wav",
+        "sample_rate_hz": sample_rate,
+        "channels": channels,
+        "sample_format": "pcm_s16le",
+        "frames": frames,
+        "duration_seconds": duration_seconds,
+        "size_bytes": len(data),
+        "peak_abs_pcm16": peak,
+        "rms_pcm16": (sum_squares / count) ** 0.5,
+        "full_scale_samples": full_scale,
+        "severe_clipping_detected": False,
+        "signal_non_silent": True,
+    }
+
+
+def _verify_kokoro_publication(run_dir, provenance, owned_files):
+    wav_path = Path(run_dir) / "narration.wav"
+    provenance_path = Path(run_dir) / "narration-provenance.json"
+    wav_bytes = _read_owned_file(wav_path, MAX_KOKORO_WAV_BYTES, owned_files.get(wav_path))
+    audio = _inspect_kokoro_wav(wav_bytes)
+    if (
+        hashlib.sha256(wav_bytes).hexdigest() != provenance["hashes"]["wav_sha256"]
+        or audio != provenance["audio"]
+    ):
+        raise ValueError("published real WAV does not match its provenance")
+    provenance_bytes = _read_owned_file(
+        provenance_path, MAX_KOKORO_PROVENANCE_BYTES, owned_files.get(provenance_path)
+    )
+    try:
+        parsed = STORYBOARD_VALIDATOR.parse_json(provenance_bytes.decode("utf-8"))
+    except (UnicodeError, ValueError) as exc:
+        raise ValueError(f"published Kokoro provenance JSON is invalid: {exc}") from exc
+    if parsed != provenance:
+        raise ValueError("published Kokoro provenance does not match the expected record")
+    if (
+        parsed.get("simulation") is not False
+        or parsed.get("execution_mode") != "local-standalone"
+        or parsed.get("productive_stage_completed") is not False
+        or parsed.get("manifest_updated") is not False
+        or parsed.get("hashes", {}).get("wav_sha256") != hashlib.sha256(wav_bytes).hexdigest()
+    ):
+        raise ValueError("published provenance misidentifies the local pilot")
+    if {entry.name for entry in Path(run_dir).iterdir()} != TTS_LOCAL_RUN_FILES:
+        raise ValueError("local Kokoro run directory is incomplete or contains unexpected files")
+
+
+def run_tts_kokoro(config_path, *, python_path, model_path, voices_path):
+    """Run one validated Kokoro inference and publish it outside the productive DAG."""
+    config, stage, script_bytes = _kokoro_stage(config_path)
+    python_file, _, _ = _hash_local_runtime_file(python_path, "Python interpreter", 512 * 1024 * 1024)
+    if os.name == "nt" and python_file.suffix.lower() != ".exe":
+        raise ValueError("Python interpreter must be an explicit .exe path on Windows")
+    if os.name != "nt" and not os.access(python_file, os.X_OK):
+        raise ValueError("Python interpreter is not executable")
+    model_file, model_sha256, model_size = _hash_local_runtime_file(
+        model_path, "Kokoro model", 1024 * 1024 * 1024
+    )
+    voices_file, voices_sha256, voices_size = _hash_local_runtime_file(
+        voices_path, "Kokoro voices", 256 * 1024 * 1024
+    )
+    worker = Path(__file__).with_name("tts-kokoro-worker.py")
+    worker_entry = _inspect_path(worker)
+    if worker_entry is None or not stat.S_ISREG(worker_entry.st_mode):
+        raise ValueError("fixed Kokoro worker is missing or unsafe")
+
+    command = [
+        str(python_file),
+        str(worker),
+        "--model", str(model_file),
+        "--voices", str(voices_file),
+        "--voice", KOKORO_VOICE,
+        "--language", KOKORO_LANGUAGE,
+    ]
+    worker_env = os.environ.copy()
+    worker_env["ONNX_PROVIDER"] = "CPUExecutionProvider"
+    worker_env["PYTHONDONTWRITEBYTECODE"] = "1"
+    worker_env["PYTHONNOUSERSITE"] = "1"
+    worker_env.pop("PYTHONPATH", None)
+    worker_env.pop("PYTHONHOME", None)
+    try:
+        completed = subprocess.run(
+            command,
+            input=script_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=KOKORO_TIMEOUT_SECONDS,
+            check=False,
+            shell=False,
+            cwd=Path(config_path).resolve().parent,
+            env=worker_env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError(f"Kokoro worker exceeded {KOKORO_TIMEOUT_SECONDS} second timeout; no retry was attempted") from exc
+    if completed.returncode != 0:
+        raise ValueError(f"Kokoro worker failed with exit code {completed.returncode}; no retry was attempted")
+    wav_bytes = completed.stdout
+    if len(wav_bytes) > MAX_KOKORO_WAV_BYTES:
+        raise ValueError(f"Kokoro worker output exceeds maximum size of {MAX_KOKORO_WAV_BYTES} bytes")
+    marker = b"KOKORO_RESULT="
+    result_line = next(
+        (line[len(marker):] for line in reversed(completed.stderr.splitlines()) if line.startswith(marker)),
+        None,
+    )
+    if result_line is None:
+        raise ValueError("Kokoro worker did not return a result record")
+    try:
+        worker_result = STORYBOARD_VALIDATOR.parse_json(result_line.decode("utf-8"))
+    except (UnicodeError, ValueError) as exc:
+        raise ValueError("Kokoro worker returned invalid result JSON") from exc
+    if not isinstance(worker_result, dict) or worker_result.get("error"):
+        raise ValueError("Kokoro worker reported a synthesis error")
+    audio = _inspect_kokoro_wav(wav_bytes)
+    if worker_result.get("provider") != "kokoro-onnx":
+        raise ValueError("Kokoro worker returned an unexpected runtime provider")
+    if worker_result.get("onnx_execution_providers") != ["CPUExecutionProvider"]:
+        raise ValueError("Kokoro worker did not use CPUExecutionProvider")
+    if worker_result.get("voice") != KOKORO_VOICE or worker_result.get("language") != KOKORO_LANGUAGE:
+        raise ValueError("Kokoro worker returned unexpected voice or language")
+    worker_audio = worker_result.get("audio")
+    if not isinstance(worker_audio, dict) or any(
+        worker_audio.get(key) != value
+        for key, value in {
+            "container": "wav",
+            "sample_rate_hz": audio["sample_rate_hz"],
+            "channels": audio["channels"],
+            "sample_format": audio["sample_format"],
+            "frames": audio["frames"],
+            "duration_seconds": audio["duration_seconds"],
+            "size_bytes": len(wav_bytes),
+            "sha256": hashlib.sha256(wav_bytes).hexdigest(),
+        }.items()
+    ):
+        raise ValueError("Kokoro worker audio report does not match returned WAV")
+    versions = worker_result.get("versions")
+    expected_versions = {"kokoro-onnx", "onnxruntime", "numpy", "phonemizer", "espeakng-loader", "soundfile"}
+    if (
+        not isinstance(versions, dict)
+        or set(versions) != expected_versions
+        or any(not isinstance(value, str) or not value for value in versions.values())
+    ):
+        raise ValueError("Kokoro worker runtime versions are incomplete")
+    if versions.get("kokoro-onnx") != KOKORO_RUNTIME_VERSION:
+        raise ValueError(f"Kokoro runtime must be version {KOKORO_RUNTIME_VERSION}")
+    if not isinstance(worker_result.get("python_version"), str) or not worker_result["python_version"]:
+        raise ValueError("Kokoro worker returned no Python version")
+    timing = worker_result.get("timing_seconds")
+    if not isinstance(timing, dict) or any(
+        not isinstance(timing.get(key), (int, float)) or isinstance(timing.get(key), bool)
+        or not math.isfinite(timing[key]) or timing[key] < 0
+        for key in ("model_initialization", "inference")
+    ):
+        raise ValueError("Kokoro worker returned invalid timing measurements")
+    peak_memory = worker_result.get("peak_working_set_bytes")
+    if peak_memory is not None and (
+        not isinstance(peak_memory, int) or isinstance(peak_memory, bool) or peak_memory < 0
+    ):
+        raise ValueError("Kokoro worker returned invalid memory measurement")
+    model_after = _hash_local_runtime_file(model_file, "Kokoro model", 1024 * 1024 * 1024)
+    voices_after = _hash_local_runtime_file(voices_file, "Kokoro voices", 256 * 1024 * 1024)
+    if model_after[1] != model_sha256 or voices_after[1] != voices_sha256:
+        raise ValueError("Kokoro model or voice file changed during inference")
+
+    script_sha256 = hashlib.sha256(script_bytes).hexdigest()
+    wav_sha256 = hashlib.sha256(wav_bytes).hexdigest()
+    provenance = {
+        "provenance_version": 1,
+        "record_type": "local-kokoro-speech-pilot",
+        "simulation": False,
+        "execution_mode": "local-standalone",
+        "dag_stage_id": stage["id"],
+        "productive_stage_completed": False,
+        "manifest_updated": False,
+        "attempts": 1,
+        "automatic_retries": False,
+        "provider_requested": "kokoro",
+        "provider_executed": worker_result["provider"],
+        "onnx_execution_providers": worker_result["onnx_execution_providers"],
+        "voice": KOKORO_VOICE,
+        "language": KOKORO_LANGUAGE,
+        "requested_audio": dict(KOKORO_AUDIO),
+        "audio": audio,
+        "hashes": {
+            "script_sha256": script_sha256,
+            "wav_sha256": wav_sha256,
+            "model_sha256": model_sha256,
+            "voices_sha256": voices_sha256,
+        },
+        "assets": {
+            "model_file": model_file.name,
+            "model_size_bytes": model_size,
+            "voices_file": voices_file.name,
+            "voices_size_bytes": voices_size,
+        },
+        "versions": {"python": worker_result.get("python_version"), **versions},
+        "timing_seconds": timing,
+        "peak_working_set_bytes": peak_memory,
+        "timeout_seconds": KOKORO_TIMEOUT_SECONDS,
+        "script_bytes": len(script_bytes),
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+    }
+    provenance_bytes = (json.dumps(provenance, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    if len(provenance_bytes) > MAX_KOKORO_PROVENANCE_BYTES:
+        raise ValueError(f"Kokoro provenance exceeds maximum size of {MAX_KOKORO_PROVENANCE_BYTES} bytes")
+
+    project_root = Path(config_path).resolve().parent
+    output_root = _ensure_project_output_directory(project_root, TTS_LOCAL_RUN_DIRECTORY)
+    run_dir = output_root / f"run-{uuid.uuid4().hex}"
+    owned_files = {}
+    run_identity = None
+    run_created = False
+    try:
+        os.mkdir(run_dir, 0o700)
+        run_created = True
+        run_entry = _inspect_path(run_dir)
+        if run_entry is None or not stat.S_ISDIR(run_entry.st_mode):
+            raise ValueError(f"created run path is not a regular directory: {run_dir}")
+        run_identity = _file_identity(run_entry)
+        wav_path = run_dir / "narration.wav"
+        provenance_path = run_dir / "narration-provenance.json"
+        _write_exclusive_file(wav_path, wav_bytes, owned_files)
+        published_wav = _read_owned_file(wav_path, MAX_KOKORO_WAV_BYTES, owned_files.get(wav_path))
+        if _inspect_kokoro_wav(published_wav) != audio or hashlib.sha256(published_wav).hexdigest() != wav_sha256:
+            raise ValueError("published Kokoro WAV failed post-write verification")
+        _write_exclusive_file(provenance_path, provenance_bytes, owned_files)
+        _verify_kokoro_publication(run_dir, provenance, owned_files)
+    except Exception as exc:
+        if not run_created:
+            raise
+        retained = _cleanup_tts_publication(run_dir, run_identity, owned_files, TTS_LOCAL_RUN_FILES)
+        if retained:
+            raise ValueError(f"Kokoro publication failed: {exc}; partial run retained at {run_dir}") from exc
+        raise
+
+    summary = {
+        "simulation": False,
+        "execution_mode": "local-standalone",
+        "productive_stage_completed": False,
+        "provider": "kokoro-onnx",
+        "voice": KOKORO_VOICE,
+        "language": KOKORO_LANGUAGE,
+        "audio": audio,
+        "hashes": provenance["hashes"],
+        "publication_dir": str(run_dir),
+        "wav_path": str(run_dir / "narration.wav"),
+        "provenance_path": str(run_dir / "narration-provenance.json"),
+    }
+    return {"summary": summary, "provenance": provenance, "publication_dir": str(run_dir)}
 
 
 def _input_fingerprint(config, config_path):
@@ -1319,6 +1720,14 @@ def main(argv=None):
         help="publish verified mock WAV and provenance in a new project-local run directory",
     )
     publication_parser.add_argument("config", help="pipeline JSON file; its directory is the project root")
+    kokoro_parser = commands.add_parser(
+        "run-tts-kokoro",
+        help="run one local Kokoro speech pilot without completing a productive DAG stage",
+    )
+    kokoro_parser.add_argument("config", help="pipeline JSON file; its directory is the project root")
+    kokoro_parser.add_argument("--python", required=True, help="absolute path to the trusted Python interpreter")
+    kokoro_parser.add_argument("--model", required=True, help="absolute path to the local Kokoro ONNX model")
+    kokoro_parser.add_argument("--voices", required=True, help="absolute path to the local Kokoro voices file")
     args = parser.parse_args(argv)
 
     if args.command == "validate-manifest":
@@ -1347,6 +1756,20 @@ def main(argv=None):
             result = save_tts_simulation(args.config)
         except (OSError, ValueError) as exc:
             print(json.dumps({"error": str(exc), "simulation": True}, ensure_ascii=False, sort_keys=True))
+            return 1
+        print(json.dumps(result["summary"], ensure_ascii=False, sort_keys=True, indent=2))
+        return 0
+
+    if args.command == "run-tts-kokoro":
+        try:
+            result = run_tts_kokoro(
+                args.config,
+                python_path=args.python,
+                model_path=args.model,
+                voices_path=args.voices,
+            )
+        except (OSError, ValueError) as exc:
+            print(json.dumps({"error": str(exc), "simulation": False}, ensure_ascii=False, sort_keys=True))
             return 1
         print(json.dumps(result["summary"], ensure_ascii=False, sort_keys=True, indent=2))
         return 0

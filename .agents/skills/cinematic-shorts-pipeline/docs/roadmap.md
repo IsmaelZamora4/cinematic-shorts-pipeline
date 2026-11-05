@@ -89,15 +89,25 @@
 - El modelo de amenazas se limita a proyectos locales confiables sin sustitución hostil concurrente de directorios. No se promete TOCTOU completo, aislamiento del sistema de archivos ni atomicidad transaccional WAV/JSON. No se aplican límites CPU/RAM/VRAM ni timeout.
 - La CI conserva Ubuntu 24.04/26.04 y añade Windows 2025. En Windows se ejecutan junctions reales y comprobaciones genéricas de reparse; los symlinks reales solo se omiten con motivo explícito si falta el privilegio. Las pruebas Linux usan symlinks reales.
 
-**Estado:** implementación local en `feature/tts-secure-publication-v0.8-phase2b`. En Windows 11/Python 3.12, se ejecutaron 136 pruebas: 133 aprobadas y 3 omitidas explícitamente por `WinError 1314` al crear symlinks; junction y detección genérica de reparse pasaron. `validate-skill.py`, las validaciones de pipeline, `simulate-tts`, `save-tts-simulation`, `validate-manifest` y `git diff --check` pasaron localmente. CI remota pendiente; sin commit, push, PR ni integración TTS productiva.
+**Estado:** PR #8 fusionado mediante squash `bfd71cc0ac7cbf969768a4b40e80c2661738026f`. La matriz de GitHub Actions en Ubuntu 24.04, Ubuntu 26.04 y Windows 2025 aprobó. En Windows 11/Python 3.12, las pruebas de junction y detección genérica de reparse pasaron; los casos de symlink que requieren privilegios se omitieron explícitamente con `WinError 1314`. La fase publica únicamente artefactos simulados y no integra TTS productivo al DAG.
 
 ## Siguiente bloque — adaptadores productivos (futuro)
 
 1. Verificar versiones locales, procedencia del modelo, licencia y requisitos del proveedor antes de implementar o declarar disponibilidad.
-2. Integrar un proveedor TTS real solo tras revisar la publicación segura de fase 2B y autorizar dicha integración.
+2. Integrar el piloto local de Kokoro al DAG productivo solo tras revisar la publicación segura y autorizar esa integración.
 3. Añadir persistencia, recuperación e invalidación de descendientes en fases separadas; no añadir reintentos implícitos.
 4. Resolver rig/asset exacto y validar poses, apoyos, root motion, mirada, manos/props y continuidad en una secuencia autorizada.
 
+## v0.9 — Phase 3B.2: Kokoro Local Integration
+
+- Añadir `run-tts-kokoro CONFIG --python ... --model ... --voices ...`, limitado a `kokoro` / `em_alex` / `es` y WAV mono PCM16 a 24 kHz.
+- Validar pipeline, storyboard, dependencia narrativa y los mismos bytes del guion antes de ejecutar. El worker Python fijo recibe el texto por stdin, ejecuta una inferencia CPU con `CPUExecutionProvider`, timeout de 300 s y sin reintentos.
+- Verificar WAV real, señal, clipping, duración, tamaño de hasta 16 MiB, límite de 300 s y SHA-256 de guion/audio/modelo/voces; registrar versiones, proveedor y mediciones disponibles.
+- Publicar exclusivamente en `.pipeline/tts-local-runs/run-<uuid>/`, separado del mock y de las salidas productivas. El registro marca `simulation: false`, `execution_mode: local-standalone`, `productive_stage_completed: false`; no modifica manifiestos ni estados `pending`.
+- Mantener las cuatro órdenes originales, `simulate-tts`, `save-tts-simulation`, contratos/fingerprints v1 y los runners Ubuntu 24.04/26.04/Windows 2025.
+
+**Fuera de alcance:** integración del worker en el DAG productivo, escritura en outputs declarados, Piper, otras voces/idiomas, remuestreo, límites de CPU/RAM/VRAM, aislamiento de red, reintentos y recuperación.
+
 ## Pendiente de implementación
 
-No hay ejecutor ni proveedor TTS, motor de render, alineador de subtítulos, descargador de assets, verificador legal automático ni QA audiovisual temporal. Los documentos de benchmark y rúbrica son protocolos, no resultados medidos.
+No hay ejecutor integrado al DAG ni adaptador productivo formalmente implementado; `run-tts-kokoro` sigue siendo una ejecución local independiente. Tampoco hay motor de render, alineador de subtítulos, descargador de assets, verificador legal automático ni QA audiovisual temporal. Los documentos de benchmark y rúbrica son protocolos, no resultados medidos.
