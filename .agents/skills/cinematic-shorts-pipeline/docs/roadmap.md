@@ -133,3 +133,12 @@ El plan original proponía integrar el piloto Kokoro al DAG con persistencia/hue
 ### Trabajo todavía pendiente
 
 El runner productivo actual solo cubre Stage 01/03 Kokoro. No existe ejecución Blender para escenas, Remotion para composición, FFmpeg para finalizar video, QA audiovisual, alineador de subtítulos, descargador/verificador de licencias, retries, resume ni orquestación audiovisual general. La rúbrica y benchmarks siguen siendo protocolos, no resultados medidos. La generación completa de cortos verticales no está implementada.
+
+## v0.10 — Phase 5A: Blender Productive Adapter Architecture (diseño en revisión)
+
+- Se prepara un diseño documental para integrar productivamente Blender en Stage 02, preservando Phase 4B, `pipeline_version: 1`, `manifest_version: 1` y sus fingerprints.
+- La propuesta recomienda un ejecutor Stage 02 en el orquestador compartido y un worker Blender fijo, con paquete ZIP único que contenga escenas `.blend`, secuencias PNG verificables, índice y provenance.
+- Stage 02 continúa `pending`; no existe adaptador Blender productivo. No se ejecutó Blender, render ni generación audiovisual durante Phase 5A.
+- Diseño actualizado para Phase 5B: Cycles CPU, perfil MVP coherente 540×960/12 FPS/[0,24), 24 PNG, `run-productive-scenes CONFIG --blender ABSOLUTE_PATH`, validación ZIP read-only en streaming y scene spec JSON v1 estricto.
+- El diseño incluye contrato de recursos, seguridad/headless, límites, compatibilidad TTS, manifiesto v1, pruebas mock multiplataforma y gates para Phase 5B/5C.
+- Entregable en revisión: `docs/blender-productive-adapter-design.md`.
