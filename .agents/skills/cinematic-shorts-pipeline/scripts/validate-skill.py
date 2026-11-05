@@ -28,7 +28,7 @@ REQUIRED = [
     "examples/abandoned-research-station/storyboard.json",
     "examples/night-station/plan.md", "examples/night-station/storyboard.json",
     "examples/cave-exploration/pipeline.json", "tests/test_pipeline.py",
-    "tests/test_tts_simulation.py",
+    "tests/test_tts_simulation.py", "tests/test_tts_publication.py",
     "examples/tts-contract/pipeline.json", "examples/tts-contract/storyboard.json",
     "examples/tts-contract/voiceover-script.txt",
     "references/pipeline-orchestration.md",

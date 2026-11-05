@@ -78,13 +78,18 @@
 - Procedencia en memoria con `simulation: true`, backend `mock`, proveedor solicitado, proveedor productivo no ejecutado, parámetros efectivos y hashes. No publicar archivos, llamar servicios, ejecutar herramientas ni completar etapas.
 - No imponer límites CPU/RAM/VRAM ni timeout; no afirmar aislamiento de red ni resistencia TOCTOU. El contrato y los fingerprints v1 permanecen intactos.
 
-**Estado:** implementación local en `feature/tts-executor-mock-v0.8-phase2`; pendiente de revisión. Sin TTS real ni artefactos publicados.
+**Estado:** integrada mediante PR #7 y squash `cfa7698bd165bedbd27d478859cdbddd3a7478a7`. Sin TTS real ni publicación de artefactos productivos.
 
-## v0.8 — fase 2B: publicación segura (pendiente)
+## v0.8 — fase 2B: publicación local segura de simulación
 
-- Diseñar y probar publicación de WAV y sidecar: temporales, validación del destino y promoción final con protección contra traversal, symlinks, colisiones y sustitución de rutas.
-- Definir limpieza de resultados parciales y límites efectivos que puedan imponerse en Windows y Ubuntu; analizar explícitamente carreras TOCTOU por plataforma.
-- Mantener separado este trabajo de reintentos, recuperación automática y TTS real. Ninguna de estas capacidades queda aprobada o implementada por fase 2A.
+- Añadir `save-tts-simulation CONFIG`, separado de `simulate-tts`, con destino fijo `.pipeline/simulations/tts/run-<uuid>/` y archivos `mock-narration.wav` y `mock-provenance.json`.
+- Reutilizar la validación y el mock aprobados; abrir archivos en modo exclusivo, verificar WAV/JSON/hashes releídos y reportar éxito solo con ambos artefactos completos.
+- Rechazar symlinks, junctions y reparse points identificables en componentes existentes. La limpieza no es recursiva: elimina únicamente archivos cuya identidad se verificó y conserva e informa parciales inciertos.
+- Mantener `pipeline_version: 1`, `manifest_version: 1`, fingerprints, salidas productivas y estados `pending`; los comandos originales y `simulate-tts` siguen siendo de solo lectura.
+- El modelo de amenazas se limita a proyectos locales confiables sin sustitución hostil concurrente de directorios. No se promete TOCTOU completo, aislamiento del sistema de archivos ni atomicidad transaccional WAV/JSON. No se aplican límites CPU/RAM/VRAM ni timeout.
+- La CI conserva Ubuntu 24.04/26.04 y añade Windows 2025. En Windows se ejecutan junctions reales y comprobaciones genéricas de reparse; los symlinks reales solo se omiten con motivo explícito si falta el privilegio. Las pruebas Linux usan symlinks reales.
+
+**Estado:** implementación local en `feature/tts-secure-publication-v0.8-phase2b`. En Windows 11/Python 3.12, se ejecutaron 136 pruebas: 133 aprobadas y 3 omitidas explícitamente por `WinError 1314` al crear symlinks; junction y detección genérica de reparse pasaron. `validate-skill.py`, las validaciones de pipeline, `simulate-tts`, `save-tts-simulation`, `validate-manifest` y `git diff --check` pasaron localmente. CI remota pendiente; sin commit, push, PR ni integración TTS productiva.
 
 ## Siguiente bloque — adaptadores productivos (futuro)
 

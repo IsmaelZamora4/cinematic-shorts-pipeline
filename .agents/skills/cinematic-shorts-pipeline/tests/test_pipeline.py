@@ -515,9 +515,11 @@ class PipelineValidationTests(unittest.TestCase):
         link = self.root / "linked-storyboard.json"
         try:
             os.symlink(outside, link)
-        except (OSError, NotImplementedError):
-            outside.unlink(missing_ok=True)
-            self.skipTest("symbolic links are unavailable in this environment")
+        except OSError as exc:
+            if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+                outside.unlink(missing_ok=True)
+                self.skipTest("Windows symlink creation omitted: runner lacks the required privilege (WinError 1314)")
+            raise
         try:
             self.config["project"]["storyboard"] = "linked-storyboard.json"
             self.write_config()
@@ -530,8 +532,10 @@ class PipelineValidationTests(unittest.TestCase):
         alias = self.root / "project-root"
         try:
             os.symlink(self.root, alias, target_is_directory=True)
-        except (OSError, NotImplementedError):
-            self.skipTest("symbolic links are unavailable in this environment")
+        except OSError as exc:
+            if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+                self.skipTest("Windows symlink creation omitted: runner lacks the required privilege (WinError 1314)")
+            raise
         try:
             self.config["workspace"]["intermediate_dir"] = "project-root"
             self.config["stages"][0]["outputs"][0]["path"] = "project-root/pipeline.json"

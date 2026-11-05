@@ -65,9 +65,15 @@ El único backend se llama `mock` y se registra en código. No se selecciona un 
 
 La simulación no ejecuta etapas del DAG, no completa estados del manifiesto, no ejecuta Kokoro/Piper ni otras herramientas, no usa red o APIs y no genera medios productivos. No promete aislamiento de red, límites CPU/RAM/VRAM ni timeout. Los cuatro comandos originales (`validate`, `plan`, `dry-run`, `validate-manifest`) conservan su operación de solo lectura; `simulate-tts` también es de solo lectura y no crea archivos, procesos o conexiones.
 
-## Fase 2B: publicación segura (pendiente)
+## Fase 2B: publicación local de simulación
 
-La publicación de WAV y sidecar no está implementada. Sigue pendiente definir e implementar creación temporal, validación final de destino, publicación resistente a symlinks/colisiones/sustitución de rutas, limpieza de escrituras parciales y límites efectivos aplicables a dicha operación. La simulación en memoria no demuestra seguridad de escritura ni resuelve carreras TOCTOU, en particular en Windows.
+`python scripts/pipeline.py save-tts-simulation examples/tts-contract/pipeline.json` vuelve a validar el pipeline, storyboard, dependencia narrativa directa y guion UTF-8, y reutiliza el mismo backend `mock` y procedencia de fase 2A. Es el único comando que publica estos resultados; `simulate-tts` y los cuatro comandos originales siguen siendo de solo lectura.
+
+La publicación escribe `mock-narration.wav` y `mock-provenance.json` bajo `.pipeline/simulations/tts/run-<uuid>/`, fuera de las salidas productivas declaradas por el pipeline. La ruta de destino es fija y no se lee del JSON. El comando crea los directorios por componentes tras inspeccionar entradas existentes, rechaza symlinks, junctions y atributos de reparse point expuestos por Python, crea un directorio exclusivo por ejecución y abre ambos archivos con modo exclusivo. Verifica los bytes WAV, cabeceras, formato, duración, JSON completo y hashes desde los archivos publicados; el JSON se escribe después del WAV. La publicación solo se informa como correcta tras verificar ambos archivos.
+
+Si ocurre un fallo, el limpiador intenta quitar únicamente archivos regulares no-reparse cuya identidad de archivo se capturó al crear mediante `fstat` y se confirmó con `lstat`; después elimina el directorio de ejecución solo si su identidad coincide y está vacío. Si no puede probar identidad o ubicación, conserva el parcial e informa su ruta. No se elimina recursivamente y no se sobrescriben resultados anteriores.
+
+El modelo de amenazas se limita a proyectos locales confiables cuyos directorios y componentes padres no sean modificados concurrentemente por actores hostiles. En Windows, el código revisa `st_file_attributes & FILE_ATTRIBUTE_REPARSE_POINT`, que cubre los reparse points reportados por Python, no solo `Path.is_junction()`; en Ubuntu se comprueba el tipo symlink con `lstat`. Esto reduce errores de configuración y colisiones en ese modelo, pero no garantiza protección TOCTOU completa ni aislamiento del sistema de archivos. El WAV y JSON no se publican como una transacción atómica: puede quedar un directorio parcial tras interrupción o identidad no verificable. No hay TTS real, reintentos, recuperación, manifiesto modificado, llamadas de red, herramientas externas, límites de CPU/RAM/VRAM ni timeout.
 
 ## Manifiesto, huellas y reanudación
 
@@ -79,15 +85,15 @@ En v0.5 `validate-manifest` valida un manifiesto ya existente. No crea ejecucion
 
 ## Seguridad y recursos
 
-- Los cuatro comandos actuales no ejecutan `shell=True`, `subprocess`, `os.system`, importación de comandos desde JSON ni acceso de red. El objeto TTS es declarativo y estricto; reconocer un proveedor no lo ejecuta.
+- Los cuatro comandos originales y `simulate-tts` no escriben ni ejecutan procesos o conexiones. `save-tts-simulation` es el único comando de escritura de esta fase y no ejecuta `shell=True`, `subprocess`, `os.system`, importación de comandos desde JSON ni acceso de red. El objeto TTS es declarativo y estricto; reconocer un proveedor no lo ejecuta.
 - La validación resuelve rutas y verifica confinamiento incluso frente a symlinks; inputs externos o absolutos quedan fuera del contrato.
-- `.pipeline/` separa estado temporal, intermedios y artefactos locales de los archivos versionados.
+- `.pipeline/` separa estado temporal, intermedios y artefactos locales de los archivos versionados. Los artefactos de fase 2B se limitan a `.pipeline/simulations/tts/` y no satisfacen ni alteran las salidas productivas del contrato.
 - Concurrencia inicial 1, dos hilos y presupuestos de 8 GB RAM/3 GB VRAM dejan margen al sistema en un equipo con 16 GB y GTX 1650 de 4 GB. El plan no mide consumo real.
 - Blender: la plantilla y el ejemplo declaran `>=4.0,<6.0` como rango de planificación para incluir la versión de referencia conocida 5.2.3. Ni esta compatibilidad ni la instalación 5.2.3 se verificaron en esta ejecución; comprobar versión y procedencia localmente antes de implementar el adaptador. Comprobar también runtime/modelo Kokoro, dependencias bloqueadas de Remotion y build de FFmpeg. Registrar versiones efectivas en el manifiesto; no inferirlas de los nombres declarados aquí.
 - Los futuros adaptadores deben recibir argumentos estructurados y rutas ya validadas, sin shell, y declarar timeout, límites de recursos y salidas verificables.
 
 ## Capacidades y límites
 
-Implementado: validación del contrato y recursos requeridos, storyboard existente, grafo DAG, orden/olas deterministas, vista previa de solo lectura, validación estructural del manifiesto, contrato TTS declarativo compatible con la etapa heredada y simulación TTS `mock` en memoria (fase 2A). Planificar o simular no equivale a ejecutar una etapa productiva.
+Implementado: validación del contrato y recursos requeridos, storyboard existente, grafo DAG, orden/olas deterministas, vista previa de solo lectura, validación estructural del manifiesto, contrato TTS declarativo compatible con la etapa heredada, simulación TTS `mock` en memoria (fase 2A) y publicación local verificada de esos artefactos simulados en ruta separada (fase 2B). Planificar, simular o publicar un mock no equivale a ejecutar una etapa productiva.
 
-Pendiente: preparar/renderizar escenas, ejecutar cualquier proveedor TTS, publicar WAV o sidecar, componer video, finalizar medios, QA audiovisual, invocación de herramientas, reintentos, escritura/recuperación de manifiestos y paralelismo real. La fase 2A crea bytes WAV simulados solo en memoria; no ha publicado ni generado audio de producción, imágenes, modelos o video.
+Pendiente: preparar/renderizar escenas, ejecutar cualquier proveedor TTS, publicar las salidas productivas declaradas por TTS, componer video, finalizar medios, QA audiovisual, invocación de herramientas, reintentos, escritura/recuperación de manifiestos y paralelismo real. La fase 2B publica únicamente silencio y procedencia etiquetados como simulación; no genera voz de producción, imágenes, modelos o video.
