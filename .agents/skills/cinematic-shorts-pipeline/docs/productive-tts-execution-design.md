@@ -1,10 +1,10 @@
 # Phase 4A — Diseño de ejecución productiva de TTS
 
-**Estado:** especificación para revisión; no implementada
+**Estado:** Phase 4A aprobada; Phase 4B implementada, suite local aprobada; CI multiplataforma pendiente
 **Fecha:** 2026-11-05
 **Base revisada:** commit 0694b0e083af1bc9fa53d82d57df8b373d5bc0a6
 **Rama de diseño:** design/productive-tts-execution-v0.10
-**PR #11:** fusionado el 2026-11-05; merge commit 0694b0e083af1bc9fa53d82d57df8b373d5bc0a6
+**PR #11:** estado remoto no verificado desde este checkout
 
 ## Decisiones aprobadas antes de Phase 4B
 
@@ -274,17 +274,16 @@ Pruebas unitarias/integración local con procesos worker sustituidos por fakes. 
 | Cross-platform | POSIX symlink tests; Windows junction y reparse tests; symlink omitido solo con WinError 1314 documentado |
 | Sin retries | timeout/error invokes worker una vez, no reintenta ni reutiliza manifiestos/output de corridas anteriores |
 
-Comandos requeridos tras la futura implementación: suite unittest, validate-skill.py, validators de ejemplos/storyboards, pipeline validate/plan/dry-run de fixtures legacy y productivas, validate-manifest sobre manifests válidos e inválidos, git diff --check y CI completo de tres plataformas. Los tests son del trabajo futuro; no se ejecutaron para esta especificación.
+Verificación local Phase 4B: suite unittest completa, 169 pruebas aprobadas y 3 skips por permisos de symlink en Windows; validate-skill.py, pipeline validate/dry-run heredados, cuatro storyboards y git diff --check pasan. No se generó audio real. CI de Ubuntu 24.04, Ubuntu 26.04 y Windows 2025 sigue pendiente de PR.
 
 ## 10. Archivos previstos para Phase 4B y 4C
 
-### Phase 4B — implementación después de aprobación explícita
+### Phase 4B — implementada
 
-- scripts/pipeline.py: contrato de elegibilidad Kokoro implementado, pseudoinput pipeline-config para Stage 01, generación/validación determinista de validated-plan, publicación en outputs configurados, comando run-productive-tts, creación/escritura segura del manifiesto, transiciones y verificación final.
-- tests/test_pipeline.py: contrato v1, input pseudo, huellas, transiciones y compatibilidad de manifests.
-- tests/test_tts_kokoro.py: añadir pruebas que garanticen que el comando standalone no cambió.
-- Nuevo tests/test_productive_tts_execution.py: ejecución exitosa/fallida, manifest, archivos, colisiones, timeout, interrupciones, cambios de inputs y límites de no-sobrescritura.
-- scripts/tts-kokoro-worker.py: no se prevé cambio; reusar interfaz actual. Solo cambiar si Phase 4B descubre una necesidad que preserve el contrato worker/standalone y reciba aprobación en revisión.
+- scripts/pipeline.py: elegibilidad Kokoro, pseudoentrada pipeline-config, validated-plan determinista, comando run-productive-tts, publicación exclusiva, checkpoints manifest v1 y verificación final.
+- tests/test_productive_tts_execution.py: éxito, fallos, huellas, invalidación, manifiestos, publicación parcial, cambios concurrentes y recuperación sin resume.
+- scripts/tts-kokoro-worker.py: reutilizado sin cambios; la síntesis mantiene un único worker.
+- Regresión local Windows: 169 pruebas; 3 skips por permisos de symlink. Audio de integración sintético.
 
 ### Phase 4C — documentación y gates
 
@@ -309,7 +308,7 @@ No cambiar templates/pipeline.json, examples/cave-exploration/pipeline.json ni e
 
 ## 12. Criterios objetivos de aceptación
 
-Phase 4B se puede declarar completa solo cuando:
+Phase 4B conserva estos gates de aceptación:
 
 - Un config productivo neutral Kokoro v1 pasa validación únicamente con la combinación de eligibility definida; Piper implemented se rechaza y todos los ejemplos/contratos heredados siguen aceptados.
 - run-productive-tts ejecuta exactamente Stage 01 y TTS, usa el worker fijo con script por stdin y ningún otro proceso, y no modifica comportamiento de comandos existentes.
@@ -327,4 +326,4 @@ Phase 4B se puede declarar completa solo cuando:
 
 Decisiones de pseudentrada pipeline-config y provenance/versiones ya aprobadas. Phase 4B implementa dos etapas, publicación sin overwrite, un intento, cero retries y cero resume. Phase 4C documentará capacidad final y evidencia CI. Mantener explícita la frontera standalone/productiva y los assets no incluidos.
 
-El diseño se releyó y contrastó con pipeline.py, worker, tests y contratos heredados. El código de Phase 4B aún no se implementa en esta revisión.
+El diseño se contrastó con pipeline.py, el worker y los contratos heredados antes de implementar. Phase 4B conserva pipeline_version=1 y manifest_version=1. Phase 4C sigue pendiente.
