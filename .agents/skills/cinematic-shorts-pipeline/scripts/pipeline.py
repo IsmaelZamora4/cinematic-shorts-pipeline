@@ -53,6 +53,8 @@ MAX_KOKORO_SCRIPT_BYTES = 8192
 MAX_KOKORO_WAV_BYTES = 16 * 1024 * 1024
 MAX_KOKORO_DURATION_SECONDS = 300
 MAX_KOKORO_PROVENANCE_BYTES = 64 * 1024
+MAX_VALIDATED_PLAN_BYTES = 1024 * 1024
+MAX_PRODUCTIVE_STORYBOARD_BYTES = 4 * 1024 * 1024
 KOKORO_TIMEOUT_SECONDS = 300
 TTS_SAMPLE_RATES = {16000, 22050, 24000, 32000, 44100, 48000}
 TTS_SAMPLE_FORMATS = {"pcm_s16le", "pcm_s24le", "pcm_f32le"}
@@ -166,22 +168,28 @@ def _validate_voiceover_script(path, label, errors):
     except OSError as exc:
         errors.append(f"{label} cannot be read: {exc}")
         return None
+    errors.extend(_voiceover_script_errors(content, label))
+    return content
+
+
+def _voiceover_script_errors(content, label):
+    errors = []
     if len(content) > MAX_VOICEOVER_SCRIPT_BYTES:
         errors.append(f"{label} exceeds maximum size of {MAX_VOICEOVER_SCRIPT_BYTES} bytes")
-        return content
+        return errors
     try:
         text = content.decode("utf-8-sig", errors="strict")
     except UnicodeDecodeError:
         errors.append(f"{label} must contain valid UTF-8 text")
-        return content
+        return errors
     if not text.strip():
         errors.append(f"{label} must not be empty or whitespace-only")
     if "\x00" in text:
         errors.append(f"{label} must not contain NUL characters")
-    return content
+    return errors
 
 
-def _validate_tts_contract(stage, label, project_resources, tool_ids, errors):
+def _validate_tts_contract(stage, label, project_resources, tool_ids, tool_by_id, errors):
     """Validate the declarative, non-executable TTS stage contract."""
     tts = stage.get("tts")
     tts_label = f"{label}.tts"
@@ -198,8 +206,25 @@ def _validate_tts_contract(stage, label, project_resources, tool_ids, errors):
         errors.append(f"{label}.tools must contain exactly the registered provider tool {tool_id}")
     if stage.get("adapter") != "tts-narration":
         errors.append(f"{label}.adapter must be 'tts-narration'")
-    if stage.get("adapter_status") != "pending":
-        errors.append(f"{label}.adapter_status must remain 'pending'; no TTS executor is implemented")
+    productive = stage.get("adapter_status") == "implemented"
+    if productive:
+        if provider != "kokoro":
+            errors.append("productive TTS currently supports Kokoro only; Piper remains declarative")
+        stage_inputs = stage.get("inputs") if isinstance(stage.get("inputs"), list) else []
+        if "validated-plan" not in stage_inputs:
+            errors.append(f"{label}.inputs must include validated-plan for productive TTS")
+        if len(stage_inputs) != 2 or not all(input_id in stage_inputs for input_id in ("validated-plan", VOICEOVER_SCRIPT_INPUT)):
+            errors.append(f"{label}.inputs must contain exactly validated-plan and {VOICEOVER_SCRIPT_INPUT} for productive TTS")
+        tool = tool_by_id.get(tool_id)
+        if tool is not None and (tool.get("availability") != "verified" or tool.get("adapter_status") != "implemented"):
+            errors.append(f"productive TTS tool {tool_id} must be implemented and availability verified")
+        if provider == "kokoro":
+            if tts.get("voice") != KOKORO_VOICE or tts.get("language") != KOKORO_LANGUAGE:
+                errors.append("productive Kokoro requires voice em_alex and language es")
+            if tts.get("audio") != KOKORO_AUDIO:
+                errors.append("productive Kokoro requires WAV mono 24000 Hz pcm_s16le")
+    elif stage.get("adapter_status") != "pending":
+        errors.append(f"{label}.adapter_status must be pending or an eligible productive implementation")
 
     _string(tts.get("voice"), f"{tts_label}.voice", errors, TTS_VOICE)
     _string(tts.get("language"), f"{tts_label}.language", errors, TTS_LANGUAGE)
@@ -442,6 +467,7 @@ def validate_config(data, config_path, captured_resources=None):
     if not isinstance(stages, list) or not stages:
         errors.append("stages must be a non-empty array")
         stages = []
+    tool_by_id = {tool["id"]: tool for tool in tools if isinstance(tool, dict) and isinstance(tool.get("id"), str)}
     stage_ids = []
     by_id = {}
     output_ids = {}
@@ -449,7 +475,7 @@ def validate_config(data, config_path, captured_resources=None):
     project_input_paths = set()
     workspace_paths = data.get("workspace") if isinstance(data.get("workspace"), dict) else {}
     output_roots = [workspace_paths.get("intermediate_dir"), workspace_paths.get("artifact_dir")]
-    top_inputs = {"storyboard"}
+    top_inputs = {"storyboard", "pipeline-config"}
     project = data.get("project") if isinstance(data.get("project"), dict) else {}
     resources = project.get("resources", []) if isinstance(project.get("resources", []), list) else []
     top_inputs.update(f"resource-{item.get('id')}" for item in resources if isinstance(item, dict) and isinstance(item.get("id"), str))
@@ -477,7 +503,7 @@ def validate_config(data, config_path, captured_resources=None):
             errors.append(f"duplicate stage id: {stage_id}")
         by_id[stage_id] = stage
         if stage_id == TTS_NARRATION_STAGE_ID:
-            _validate_tts_contract(stage, label, project_resources, tool_ids, errors)
+            _validate_tts_contract(stage, label, project_resources, tool_ids, tool_by_id, errors)
         elif "tts" in stage:
             errors.append(f"{label}.tts is only valid on {TTS_NARRATION_STAGE_ID}")
         _string(stage.get("adapter"), f"{label}.adapter", errors, SLUG)
@@ -556,6 +582,30 @@ def validate_config(data, config_path, captured_resources=None):
             errors.append(
                 f"stage {TTS_NARRATION_STAGE_ID} must directly depend on 01-validate-project"
             )
+        if tts_stage.get("adapter_status") == "implemented":
+            validation_stage = by_id.get("01-validate-project", {})
+            if validation_stage.get("adapter") != "builtin-validation" or validation_stage.get("adapter_status") != "implemented":
+                errors.append("productive 01-validate-project must use implemented builtin-validation")
+            validation_outputs = validation_stage.get("outputs", [])
+            validation_output_ids = [output.get("id") for output in validation_outputs if isinstance(output, dict)] if isinstance(validation_outputs, list) else []
+            if validation_output_ids != ["validated-plan"]:
+                errors.append("productive 01-validate-project must declare exactly validated-plan output")
+            if "pipeline-config" not in validation_stage.get("inputs", []):
+                errors.append("productive 01-validate-project.inputs must include pipeline-config")
+            validation_inputs = validation_stage.get("inputs", [])
+            required_validation_inputs = {"pipeline-config", "storyboard"} | {
+                f"resource-{resource_id}" for resource_id, resource in project_resources.items()
+                if resource.get("required") is True
+            }
+            if (
+                not isinstance(validation_inputs, list)
+                or len(validation_inputs) != len(required_validation_inputs)
+                or not all(input_id in validation_inputs for input_id in required_validation_inputs)
+            ):
+                errors.append("productive 01-validate-project.inputs must contain pipeline-config, storyboard, and all required resources only")
+            kokoro_tool = tool_by_id.get("kokoro", {})
+            if kokoro_tool.get("version_requirement") != "kokoro-onnx==0.6.1; Python>=3.10,<3.14; CPUExecutionProvider":
+                errors.append("productive Kokoro tool version_requirement must declare the supported runtime contract")
         script_path = project_resource_paths.get(VOICEOVER_SCRIPT_ID)
         if script_path is not None and script_path.is_file():
             script_content = _validate_voiceover_script(
@@ -590,6 +640,8 @@ def validate_config(data, config_path, captured_resources=None):
             for input_id in inputs:
                 if not isinstance(input_id, str):
                     continue
+                if input_id == "pipeline-config" and stage_id != "01-validate-project":
+                    errors.append("pipeline-config may only be used by 01-validate-project")
                 if input_id not in known_inputs:
                     errors.append(f"stage {stage_id} references unknown input or artifact: {input_id}")
                 elif input_id in output_ids and output_ids[input_id] not in ancestors[stage_id]:
@@ -1368,6 +1420,415 @@ def run_tts_kokoro(config_path, *, python_path, model_path, voices_path):
     return {"summary": summary, "provenance": provenance, "publication_dir": str(run_dir)}
 
 
+def _productive_stage(config, stage_id):
+    return next(stage for stage in config["stages"] if stage["id"] == stage_id)
+
+
+def _productive_paths(root, stage):
+    return {
+        output["id"]: root.joinpath(*PurePosixPath(output["path"]).parts)
+        for output in stage["outputs"]
+    }
+
+
+def _preflight_productive_path(path, label):
+    path = Path(path)
+    missing_parent = False
+    current = Path(path.anchor)
+    for component in path.parts[1:-1]:
+        current /= component
+        if missing_parent:
+            continue
+        entry = _inspect_path(current)
+        if entry is None:
+            missing_parent = True
+        elif not stat.S_ISDIR(entry.st_mode):
+            raise ValueError(f"{label} parent is not a regular directory: {current}")
+    if not missing_parent:
+        entry = _inspect_path(path)
+        if entry is not None:
+            raise ValueError(f"{label} already exists: {path}")
+
+
+def _atomic_manifest_write(path, manifest):
+    path = Path(path)
+    payload = (json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("xb") as stream:
+            stream.write(payload)
+            stream.flush()
+            try:
+                os.fsync(stream.fileno())
+            except OSError:
+                pass
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _productive_snapshot(config, config_path):
+    root = Path(config_path).resolve().parent
+    hashes = _project_input_hashes(config, config_path)
+    entries = []
+    declared = {"storyboard": config["project"]["storyboard"]}
+    declared.update({f"resource-{item['id']}": item["path"] for item in config["project"]["resources"]})
+    required_ids = {
+        f"resource-{item['id']}" for item in config["project"]["resources"] if item["required"] is True
+    }
+    stage = _productive_stage(config, "01-validate-project")
+    selected = [item for item in stage["inputs"] if item != "pipeline-config"]
+    for input_id in sorted(selected):
+        relative = declared.get(input_id)
+        if relative is None:
+            raise ValueError(f"Stage 01 references unsupported project input: {input_id}")
+        path = root.joinpath(*PurePosixPath(relative).parts)
+        if input_id == "storyboard":
+            size_bytes = path.stat().st_size
+            if size_bytes > MAX_PRODUCTIVE_STORYBOARD_BYTES:
+                raise ValueError(f"storyboard exceeds maximum size of {MAX_PRODUCTIVE_STORYBOARD_BYTES} bytes")
+            data = path.read_bytes()
+            try:
+                storyboard = STORYBOARD_VALIDATOR.parse_json(data.decode("utf-8"))
+            except (UnicodeError, ValueError) as exc:
+                raise ValueError("storyboard changed to invalid JSON during execution preflight") from exc
+            storyboard_errors = STORYBOARD_VALIDATOR.validate(storyboard)
+            if storyboard_errors:
+                raise ValueError("storyboard changed to an invalid document during execution preflight")
+            digest = hashlib.sha256(data).hexdigest()
+        elif input_id in required_ids:
+            size_bytes = path.stat().st_size
+            if size_bytes > MAX_VOICEOVER_SCRIPT_BYTES and input_id == VOICEOVER_SCRIPT_INPUT:
+                raise ValueError(f"voiceover script exceeds maximum size of {MAX_VOICEOVER_SCRIPT_BYTES} bytes")
+            if input_id == VOICEOVER_SCRIPT_INPUT:
+                data = path.read_bytes()
+                script_errors = _voiceover_script_errors(data, input_id)
+                if script_errors:
+                    raise ValueError("; ".join(script_errors))
+                digest = hashlib.sha256(data).hexdigest()
+            else:
+                digest = sha256_file(path)
+        else:
+            size_bytes = path.stat().st_size
+            digest = sha256_file(path)
+        if hashes.get(input_id) != digest:
+            raise ValueError(f"project input changed while preparing execution: {input_id}")
+        entries.append({"id": input_id, "path": relative, "size_bytes": size_bytes, "sha256": digest})
+    return hashes, entries
+
+
+def _validated_plan(config, config_path, waves, input_entries, input_hashes):
+    stage = _productive_stage(config, "01-validate-project")
+    stage_hashes = {key: input_hashes[key] for key in stage["inputs"]}
+    ordered_stages = []
+    for wave in waves:
+        for stage_id in wave:
+            item = _productive_stage(config, stage_id)
+            ordered_stages.append({
+                "id": item["id"],
+                "adapter": item["adapter"],
+                "depends_on": item["depends_on"],
+                "inputs": item["inputs"],
+                "outputs": item["outputs"],
+                "tools": item["tools"],
+                "adapter_status": item["adapter_status"],
+            })
+    return {
+        "validated_plan_version": 1,
+        "pipeline_version": config["pipeline_version"],
+        "project_id": config["project"]["id"],
+        "config_fingerprint": fingerprint(config),
+        "profile": config["profile"],
+        "workspace": config["workspace"],
+        "validation": {
+            "pipeline": "PASS",
+            "storyboard_validator": "validate-storyboard-v1",
+            "storyboard": "PASS",
+            "dag": "PASS",
+            "required_resources": "PASS",
+        },
+        "inputs": input_entries,
+        "execution_waves": waves,
+        "stages": ordered_stages,
+        "stage_fingerprint": stage_fingerprint(config, stage, stage_hashes, {}),
+    }
+
+
+def _verify_validated_plan(data, config, config_path, waves):
+    try:
+        parsed = STORYBOARD_VALIDATOR.parse_json(data.decode("utf-8"))
+    except (UnicodeError, ValueError) as exc:
+        raise ValueError("validated-plan JSON is invalid") from exc
+    hashes, entries = _productive_snapshot(config, config_path)
+    expected = _validated_plan(config, config_path, waves, entries, hashes)
+    canonical = (json.dumps(expected, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    if parsed != expected or data != canonical:
+        raise ValueError("validated-plan does not match the current validated project snapshot")
+    return parsed
+
+
+def _assert_productive_config_unchanged(config, config_path):
+    current, errors, _, _ = load_and_validate_config(config_path)
+    if errors or current != config:
+        raise ValueError("pipeline config changed during execution")
+
+
+def _productive_worker(config_path, script_bytes, *, python_path, model_path, voices_path):
+    python_file, _, _ = _hash_local_runtime_file(python_path, "Python interpreter", 512 * 1024 * 1024)
+    if os.name == "nt" and python_file.suffix.lower() != ".exe":
+        raise ValueError("Python interpreter must be an explicit .exe path on Windows")
+    if os.name != "nt" and not os.access(python_file, os.X_OK):
+        raise ValueError("Python interpreter is not executable")
+    model_file, model_sha256, model_size = _hash_local_runtime_file(model_path, "Kokoro model", 1024 * 1024 * 1024)
+    voices_file, voices_sha256, voices_size = _hash_local_runtime_file(voices_path, "Kokoro voices", 256 * 1024 * 1024)
+    worker = Path(__file__).with_name("tts-kokoro-worker.py")
+    worker_file, worker_sha256, worker_size = _hash_local_runtime_file(worker, "Kokoro worker", 16 * 1024 * 1024)
+    command = [str(python_file), str(worker_file), "--model", str(model_file), "--voices", str(voices_file), "--voice", KOKORO_VOICE, "--language", KOKORO_LANGUAGE]
+    worker_env = os.environ.copy()
+    worker_env["ONNX_PROVIDER"] = "CPUExecutionProvider"
+    worker_env["PYTHONDONTWRITEBYTECODE"] = "1"
+    worker_env["PYTHONNOUSERSITE"] = "1"
+    worker_env.pop("PYTHONPATH", None)
+    worker_env.pop("PYTHONHOME", None)
+    try:
+        completed = subprocess.run(
+            command, input=script_bytes, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=KOKORO_TIMEOUT_SECONDS, check=False, shell=False,
+            cwd=Path(config_path).resolve().parent, env=worker_env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError(f"Kokoro worker exceeded {KOKORO_TIMEOUT_SECONDS} second timeout; no retry was attempted") from exc
+    if completed.returncode != 0:
+        raise ValueError(f"Kokoro worker failed with exit code {completed.returncode}; no retry was attempted")
+    wav_bytes = completed.stdout
+    if not isinstance(wav_bytes, bytes) or len(wav_bytes) > MAX_KOKORO_WAV_BYTES:
+        raise ValueError("Kokoro worker output exceeds the supported WAV size")
+    marker = b"KOKORO_RESULT="
+    line = next((item[len(marker):] for item in reversed(completed.stderr.splitlines()) if item.startswith(marker)), None)
+    if line is None:
+        raise ValueError("Kokoro worker did not return a result record")
+    try:
+        result = STORYBOARD_VALIDATOR.parse_json(line.decode("utf-8"))
+    except (UnicodeError, ValueError) as exc:
+        raise ValueError("Kokoro worker returned invalid result JSON") from exc
+    if not isinstance(result, dict) or result.get("error"):
+        raise ValueError("Kokoro worker reported a synthesis error")
+    audio = _inspect_kokoro_wav(wav_bytes)
+    digest = hashlib.sha256(wav_bytes).hexdigest()
+    worker_audio = result.get("audio")
+    if result.get("provider") != "kokoro-onnx" or result.get("onnx_execution_providers") != ["CPUExecutionProvider"]:
+        raise ValueError("Kokoro worker did not verify the expected CPU runtime")
+    if result.get("voice") != KOKORO_VOICE or result.get("language") != KOKORO_LANGUAGE:
+        raise ValueError("Kokoro worker returned unexpected voice or language")
+    if not isinstance(worker_audio, dict) or any(
+        worker_audio.get(key) != value for key, value in {
+            "container": "wav", "sample_rate_hz": audio["sample_rate_hz"], "channels": audio["channels"],
+            "sample_format": audio["sample_format"], "frames": audio["frames"],
+            "duration_seconds": audio["duration_seconds"], "size_bytes": len(wav_bytes), "sha256": digest,
+        }.items()
+    ):
+        raise ValueError("Kokoro worker audio report does not match returned WAV")
+    versions = result.get("versions")
+    expected_versions = {"kokoro-onnx", "onnxruntime", "numpy", "phonemizer", "espeakng-loader", "soundfile"}
+    if not isinstance(versions, dict) or set(versions) != expected_versions or any(not isinstance(v, str) or not v for v in versions.values()):
+        raise ValueError("Kokoro worker runtime versions are incomplete")
+    if versions.get("kokoro-onnx") != KOKORO_RUNTIME_VERSION:
+        raise ValueError(f"Kokoro runtime must be version {KOKORO_RUNTIME_VERSION}")
+    python_version = result.get("python_version")
+    if not isinstance(python_version, str) or not python_version:
+        raise ValueError("Kokoro worker returned no Python version")
+    timing = result.get("timing_seconds")
+    if not isinstance(timing, dict) or any(not isinstance(timing.get(key), (int, float)) or isinstance(timing[key], bool) or not math.isfinite(timing[key]) or timing[key] < 0 for key in ("model_initialization", "inference")):
+        raise ValueError("Kokoro worker returned invalid timing measurements")
+    for path, expected in ((model_file, model_sha256), (voices_file, voices_sha256), (worker_file, worker_sha256)):
+        if _hash_local_runtime_file(path, "Kokoro runtime asset", 1024 * 1024 * 1024)[1] != expected:
+            raise ValueError("Kokoro runtime asset changed during inference")
+    return {
+        "wav_bytes": wav_bytes, "audio": audio, "worker_result": result, "versions": versions,
+        "python_version": python_version, "worker_sha256": worker_sha256,
+        "model": {"file_name": model_file.name, "size_bytes": model_size, "sha256": model_sha256, "version_identity": f"sha256:{model_sha256}"},
+        "voices": {"file_name": voices_file.name, "size_bytes": voices_size, "sha256": voices_sha256, "version_identity": f"sha256:{voices_sha256}"},
+        "worker_size": worker_size,
+    }
+
+
+def run_productive_tts(config_path, *, python_path, model_path, voices_path):
+    """Run only the validated-plan and Kokoro productive stages with manifest v1 checkpoints."""
+    config, errors, _, waves = load_and_validate_config(config_path)
+    if errors:
+        raise ValueError("pipeline validation failed: " + "; ".join(errors))
+    stage01 = _productive_stage(config, "01-validate-project")
+    stage03 = _productive_stage(config, TTS_NARRATION_STAGE_ID)
+    if stage03.get("adapter_status") != "implemented" or stage03["tts"].get("provider") != "kokoro":
+        raise ValueError("run-productive-tts requires the productive Kokoro contract")
+    root = Path(config_path).resolve().parent
+    captured = {}
+    config_again, errors, _, waves = load_and_validate_config(config_path, captured)
+    if errors or config_again != config:
+        raise ValueError("pipeline config changed during execution preflight")
+    script_bytes = captured.get(VOICEOVER_SCRIPT_ID)
+    if not isinstance(script_bytes, bytes) or len(script_bytes) > MAX_KOKORO_SCRIPT_BYTES:
+        raise ValueError(f"productive script must contain 1 to {MAX_KOKORO_SCRIPT_BYTES} UTF-8 bytes")
+    stage01_paths = _productive_paths(root, stage01)
+    stage03_paths = _productive_paths(root, stage03)
+    all_output_paths = list(stage01_paths.values()) + list(stage03_paths.values())
+    if len(set(map(str.casefold, map(str, all_output_paths)))) != len(all_output_paths):
+        raise ValueError("productive outputs collide")
+    for path in all_output_paths:
+        _preflight_productive_path(path, "productive output")
+    manifest_components = tuple(PurePosixPath(config["workspace"]["manifest_dir"]).parts)
+    manifest_root = root.joinpath(*manifest_components)
+    run_id = str(uuid.uuid4())
+    run_dir = manifest_root / f"run-{run_id}"
+    manifest_path = run_dir / "manifest.json"
+    _preflight_productive_path(manifest_path, "manifest destination")
+    # Probe all explicit local assets before creating a run record or outputs.
+    _hash_local_runtime_file(python_path, "Python interpreter", 512 * 1024 * 1024)
+    _hash_local_runtime_file(model_path, "Kokoro model", 1024 * 1024 * 1024)
+    _hash_local_runtime_file(voices_path, "Kokoro voices", 256 * 1024 * 1024)
+    input_hashes, input_entries = _productive_snapshot(config, config_path)
+    if hashlib.sha256(script_bytes).hexdigest() != input_hashes.get(VOICEOVER_SCRIPT_INPUT):
+        raise ValueError("voiceover script changed during execution preflight")
+    plan = _validated_plan(config, config_path, waves, input_entries, input_hashes)
+    plan_bytes = (json.dumps(plan, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    if len(plan_bytes) > MAX_VALIDATED_PLAN_BYTES:
+        raise ValueError(f"validated-plan exceeds maximum size of {MAX_VALIDATED_PLAN_BYTES} bytes")
+    _ensure_project_output_directory(root, manifest_components)
+    try:
+        os.mkdir(run_dir, 0o700)
+    except FileExistsError as exc:
+        raise ValueError(f"manifest run directory already exists: {run_dir}") from exc
+    run_entry = _inspect_path(run_dir)
+    run_identity = _file_identity(run_entry) if run_entry is not None else None
+    if run_entry is None or not stat.S_ISDIR(run_entry.st_mode) or run_identity is None:
+        raise ValueError("cannot verify exclusive manifest run directory")
+    manifest = new_pending_manifest(config, config_path)
+    manifest["run_id"] = run_id
+    plan_owned = {}
+    tts_owned = {}
+    tts_started = False
+    try:
+        _atomic_manifest_write(manifest_path, manifest)
+        plan_path = stage01_paths["validated-plan"]
+        _ensure_project_output_directory(root, tuple(PurePosixPath(stage01_paths["validated-plan"].relative_to(root).as_posix()).parts[:-1]))
+        try:
+            _write_exclusive_file(plan_path, plan_bytes, plan_owned)
+            verified_plan = _read_owned_file(plan_path, MAX_VALIDATED_PLAN_BYTES, plan_owned.get(plan_path))
+            _verify_validated_plan(verified_plan, config, config_path, waves)
+            plan_hash = hashlib.sha256(verified_plan).hexdigest()
+        except Exception:
+            retained = []
+            for owned_path, identity in plan_owned.items():
+                if not _remove_owned_file(owned_path, identity) and os.path.lexists(owned_path):
+                    retained.append(str(owned_path))
+            if retained:
+                raise ValueError("validated-plan publication failed; partial output retained at " + ", ".join(retained))
+            raise
+        stage01_hashes = {key: input_hashes[key] for key in stage01["inputs"]}
+        manifest["stages"]["01-validate-project"].update(
+            status="completed", attempts=1,
+            artifacts=[{"id": "validated-plan", "path": next(item["path"] for item in stage01["outputs"] if item["id"] == "validated-plan"), "sha256": plan_hash}],
+            stage_fingerprint=stage_fingerprint(config, stage01, stage01_hashes, {}),
+        )
+        _atomic_manifest_write(manifest_path, manifest)
+        _assert_productive_config_unchanged(config, config_path)
+        if _productive_snapshot(config, config_path)[0] != input_hashes:
+            raise ValueError("project inputs changed during execution")
+        tts_started = True
+        worker = _productive_worker(config_path, script_bytes, python_path=python_path, model_path=model_path, voices_path=voices_path)
+        if _productive_snapshot(config, config_path)[0] != input_hashes:
+            raise ValueError("project inputs changed during execution")
+        _assert_productive_config_unchanged(config, config_path)
+        if hashlib.sha256(script_bytes).hexdigest() != input_hashes[VOICEOVER_SCRIPT_INPUT]:
+            raise ValueError("voiceover script changed during execution")
+        runtime = {
+            "python_version": worker["python_version"], "worker_sha256": worker["worker_sha256"],
+            "dependencies": worker["versions"], "onnx_execution_providers": worker["worker_result"]["onnx_execution_providers"],
+        }
+        provenance = {
+            "provenance_version": 1, "run_id": run_id, "project_id": config["project"]["id"],
+            "dag_stage_id": TTS_NARRATION_STAGE_ID, "provider": "kokoro-onnx", "voice": KOKORO_VOICE, "language": KOKORO_LANGUAGE,
+            "requested_audio": dict(KOKORO_AUDIO), "audio": worker["audio"], "runtime": runtime,
+            "assets": {"model": worker["model"], "voices": worker["voices"]},
+            "hashes": {"script_sha256": input_hashes[VOICEOVER_SCRIPT_INPUT], "wav_sha256": hashlib.sha256(worker["wav_bytes"]).hexdigest(), "validated_plan_sha256": plan_hash},
+            "timing_seconds": worker["worker_result"]["timing_seconds"], "timeout_seconds": KOKORO_TIMEOUT_SECONDS,
+            "attempts": 1, "automatic_retries": False,
+        }
+        provenance_bytes = (json.dumps(provenance, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
+        if len(provenance_bytes) > MAX_KOKORO_PROVENANCE_BYTES:
+            raise ValueError("productive Kokoro provenance exceeds maximum size")
+        try:
+            for output_id, payload in (("narration", worker["wav_bytes"]), ("narration-provenance", provenance_bytes)):
+                path = stage03_paths[output_id]
+                _ensure_project_output_directory(root, tuple(PurePosixPath(path.relative_to(root).as_posix()).parts[:-1]))
+                _write_exclusive_file(path, payload, tts_owned)
+            wav_published = _read_owned_file(stage03_paths["narration"], MAX_KOKORO_WAV_BYTES, tts_owned.get(stage03_paths["narration"]))
+            audio_published = _inspect_kokoro_wav(wav_published)
+            prov_published = _read_owned_file(stage03_paths["narration-provenance"], MAX_KOKORO_PROVENANCE_BYTES, tts_owned.get(stage03_paths["narration-provenance"]))
+            parsed_provenance = STORYBOARD_VALIDATOR.parse_json(prov_published.decode("utf-8"))
+            if audio_published != worker["audio"] or parsed_provenance != provenance:
+                raise ValueError("productive TTS outputs failed post-publication verification")
+            if _productive_snapshot(config, config_path)[0] != input_hashes:
+                raise ValueError("project inputs changed during execution")
+        except Exception:
+            retained = []
+            for owned_path, identity in tts_owned.items():
+                if not _remove_owned_file(owned_path, identity) and os.path.lexists(owned_path):
+                    retained.append(str(owned_path))
+            if retained:
+                raise ValueError("productive TTS publication failed; partial outputs retained at " + ", ".join(retained))
+            raise
+        tool_identity = {"runtime": runtime, "assets": {
+            "model": {"sha256": worker["model"]["sha256"]},
+            "voices": {"sha256": worker["voices"]["sha256"]},
+        }}
+        compact_tool_version = json.dumps(tool_identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        stage03_hashes = {"validated-plan": plan_hash, VOICEOVER_SCRIPT_INPUT: input_hashes[VOICEOVER_SCRIPT_INPUT]}
+        tts_artifacts = [
+            {"id": output_id, "path": next(item["path"] for item in stage03["outputs"] if item["id"] == output_id), "sha256": sha256_file(path)}
+            for output_id, path in stage03_paths.items()
+        ]
+        manifest["stages"][TTS_NARRATION_STAGE_ID].update(
+            status="completed", attempts=1, artifacts=tts_artifacts,
+            stage_fingerprint=stage_fingerprint(config, stage03, stage03_hashes, {"kokoro": compact_tool_version}),
+            tool_versions={"kokoro": compact_tool_version},
+        )
+        _atomic_manifest_write(manifest_path, manifest)
+        final_errors, final_warnings = validate_manifest_file(config_path, manifest_path)
+        if final_errors or final_warnings:
+            raise ValueError("final manifest validation failed: " + "; ".join(final_errors + final_warnings))
+        return {
+            "manifest_path": str(manifest_path), "run_id": run_id, "stages": {key: value["status"] for key, value in manifest["stages"].items()},
+            "audio": worker["audio"], "provenance": provenance, "tool_versions": {"kokoro": compact_tool_version},
+        }
+    except Exception as exc:
+        tts_entry = manifest["stages"][TTS_NARRATION_STAGE_ID]
+        validation_entry = manifest["stages"]["01-validate-project"]
+        changed_inputs = "project inputs changed" in str(exc) or "script changed" in str(exc) or "pipeline config changed" in str(exc)
+        if changed_inputs and validation_entry["status"] == "completed":
+            for owned_path, identity in plan_owned.items():
+                _remove_owned_file(owned_path, identity)
+            validation_entry.update(status="failed", attempts=1, error="project inputs changed during execution", artifacts=[], stage_fingerprint=None, tool_versions={})
+            tts_entry.update(status="failed" if tts_started else "blocked", attempts=1 if tts_started else 0, error=str(exc)[:500], artifacts=[], stage_fingerprint=None, tool_versions={})
+        elif validation_entry["status"] == "pending":
+            validation_entry.update(status="failed", attempts=1, error=str(exc)[:500])
+            tts_entry.update(status="blocked", error="01-validate-project failed")
+        elif tts_entry["status"] != "completed":
+            tts_entry.update(status="failed", attempts=1, error=str(exc)[:500], artifacts=[])
+        else:
+            for owned_path, identity in tts_owned.items():
+                _remove_owned_file(owned_path, identity)
+            tts_entry.update(status="failed", attempts=1, error="final manifest verification failed", artifacts=[], stage_fingerprint=None, tool_versions={})
+        try:
+            _atomic_manifest_write(manifest_path, manifest)
+        except OSError as persist_exc:
+            raise ValueError(f"productive TTS failed and failure manifest could not be persisted: {persist_exc}") from exc
+        raise
+
+
 def _input_fingerprint(config, config_path):
     root = Path(config_path).resolve().parent
     inputs = [("storyboard", config["project"]["storyboard"])]
@@ -1389,6 +1850,11 @@ def _project_input_hashes(config, config_path):
         path = root.joinpath(*PurePosixPath(relative).parts).resolve()
         if path.is_file():
             hashes[input_id] = sha256_file(path)
+    if "pipeline-config" in next(
+        (stage.get("inputs", []) for stage in config.get("stages", []) if isinstance(stage, dict) and stage.get("id") == "01-validate-project"),
+        [],
+    ):
+        hashes["pipeline-config"] = fingerprint(config)
     return hashes
 
 
@@ -1728,6 +2194,13 @@ def main(argv=None):
     kokoro_parser.add_argument("--python", required=True, help="absolute path to the trusted Python interpreter")
     kokoro_parser.add_argument("--model", required=True, help="absolute path to the local Kokoro ONNX model")
     kokoro_parser.add_argument("--voices", required=True, help="absolute path to the local Kokoro voices file")
+    productive_parser = commands.add_parser(
+        "run-productive-tts", help="execute validated-plan and productive local Kokoro stages"
+    )
+    productive_parser.add_argument("config", help="pipeline JSON file; its directory is the project root")
+    productive_parser.add_argument("--python", required=True, help="absolute path to the trusted Python interpreter")
+    productive_parser.add_argument("--model", required=True, help="absolute path to the local Kokoro ONNX model")
+    productive_parser.add_argument("--voices", required=True, help="absolute path to the local Kokoro voices file")
     args = parser.parse_args(argv)
 
     if args.command == "validate-manifest":
@@ -1772,6 +2245,17 @@ def main(argv=None):
             print(json.dumps({"error": str(exc), "simulation": False}, ensure_ascii=False, sort_keys=True))
             return 1
         print(json.dumps(result["summary"], ensure_ascii=False, sort_keys=True, indent=2))
+        return 0
+
+    if args.command == "run-productive-tts":
+        try:
+            result = run_productive_tts(
+                args.config, python_path=args.python, model_path=args.model, voices_path=args.voices,
+            )
+        except (OSError, ValueError) as exc:
+            print(json.dumps({"error": str(exc), "simulation": False}, ensure_ascii=False, sort_keys=True))
+            return 1
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
         return 0
 
     config, errors, warnings, waves = load_and_validate_config(args.config)
