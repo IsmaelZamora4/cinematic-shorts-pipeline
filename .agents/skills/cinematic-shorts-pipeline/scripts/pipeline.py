@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Validate, preview, and simulate TTS in memory without executing production adapters."""
+"""Validate and preview pipelines, simulate TTS in memory, and publish mock simulations only."""
 import argparse
 import hashlib
 import importlib.util
 import json
+import os
 import re
+import stat
 import struct
 import sys
 import uuid
@@ -29,8 +31,11 @@ VOICEOVER_SCRIPT_ID = "voiceover-script"
 VOICEOVER_SCRIPT_INPUT = f"resource-{VOICEOVER_SCRIPT_ID}"
 MAX_VOICEOVER_SCRIPT_BYTES = 1024 * 1024
 MAX_MOCK_WAV_BYTES = 512 * 1024
+MAX_MOCK_PROVENANCE_BYTES = 64 * 1024
 MOCK_DURATION_MS = 1000
 MOCK_AUDIO_COMMENT = b"SIMULATED MOCK SILENCE; NOT SPEECH"
+TTS_SIMULATION_DIRECTORY = (".pipeline", "simulations", "tts")
+TTS_SIMULATION_FILES = frozenset({"mock-narration.wav", "mock-provenance.json"})
 TTS_SAMPLE_RATES = {16000, 22050, 24000, 32000, 44100, 48000}
 TTS_SAMPLE_FORMATS = {"pcm_s16le", "pcm_s24le", "pcm_f32le"}
 TTS_VOICE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -754,6 +759,214 @@ def simulate_tts(config_path, backend="mock"):
     return {"summary": summary, "provenance": provenance, "wav_bytes": wav_bytes}
 
 
+def _is_reparse_point(file_stat):
+    """Detect symlinks and every Windows reparse point exposed by os.stat()."""
+    if stat.S_ISLNK(file_stat.st_mode):
+        return True
+    reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(getattr(file_stat, "st_file_attributes", 0) & reparse_attribute)
+
+
+def _file_identity(file_stat):
+    """Return a comparable filesystem identity, or None when the platform omits it."""
+    device = getattr(file_stat, "st_dev", None)
+    inode = getattr(file_stat, "st_ino", None)
+    if device is None or inode in (None, 0):
+        return None
+    return device, inode
+
+
+def _inspect_path(path):
+    """lstat a path and reject links/reparse points before using the entry."""
+    try:
+        entry = Path(path).lstat()
+    except FileNotFoundError:
+        return None
+    if _is_reparse_point(entry):
+        raise ValueError(f"unsafe destination component is a symbolic link or reparse point: {path}")
+    return entry
+
+
+def _ensure_tts_simulation_directory(project_root):
+    """Create the fixed output path one directory at a time without following links."""
+    current = Path(project_root)
+    root_stat = _inspect_path(current)
+    if root_stat is None or not stat.S_ISDIR(root_stat.st_mode):
+        raise ValueError(f"project root is not a directory: {current}")
+    for component in TTS_SIMULATION_DIRECTORY:
+        current = current / component
+        entry = _inspect_path(current)
+        if entry is None:
+            try:
+                os.mkdir(current, 0o700)
+            except FileExistsError:
+                # Another trusted invocation may have created this shared parent.
+                pass
+            entry = _inspect_path(current)
+        if entry is None or not stat.S_ISDIR(entry.st_mode):
+            raise ValueError(f"unsafe destination component is not a directory: {current}")
+    return current
+
+
+def _write_exclusive_file(path, payload, owned_files):
+    """Create a file without replacement and record identity before writing bytes."""
+    with Path(path).open("xb") as stream:
+        identity = _file_identity(os.fstat(stream.fileno()))
+        owned_files[Path(path)] = identity
+        stream.write(payload)
+        stream.flush()
+
+
+def _read_owned_file(path, maximum_size, identity):
+    """Read a bounded regular file only while its recorded identity still matches."""
+    path = Path(path)
+    before = _inspect_path(path)
+    if before is None or not stat.S_ISREG(before.st_mode) or identity is None:
+        raise ValueError(f"cannot verify identity of published file: {path}")
+    if _file_identity(before) != identity:
+        raise ValueError(f"published file identity changed: {path}")
+    with path.open("rb") as stream:
+        payload = stream.read(maximum_size + 1)
+    after = _inspect_path(path)
+    if after is None or _file_identity(after) != identity:
+        raise ValueError(f"published file identity changed while reading: {path}")
+    if len(payload) > maximum_size:
+        raise ValueError(f"published file exceeds maximum size of {maximum_size} bytes: {path}")
+    return payload
+
+
+def _remove_owned_file(path, identity):
+    """Unlink only a regular, non-reparse file whose identity we recorded at creation."""
+    path = Path(path)
+    if identity is None:
+        return False
+    try:
+        entry = _inspect_path(path)
+        if entry is None or not stat.S_ISREG(entry.st_mode) or _file_identity(entry) != identity:
+            return False
+        os.unlink(path)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _cleanup_tts_publication(run_dir, run_identity, owned_files):
+    """Remove only verified files from this run and then its still-owned empty directory."""
+    run_dir = Path(run_dir)
+    remaining = False
+    for path, identity in owned_files.items():
+        if path.parent != run_dir or path.name not in TTS_SIMULATION_FILES:
+            remaining = True
+            continue
+        if not _remove_owned_file(path, identity):
+            if os.path.lexists(path):
+                remaining = True
+    if run_identity is None:
+        remaining = True
+    else:
+        try:
+            entry = _inspect_path(run_dir)
+            if entry is None or not stat.S_ISDIR(entry.st_mode) or _file_identity(entry) != run_identity:
+                remaining = True
+            elif not remaining:
+                os.rmdir(run_dir)
+        except (OSError, ValueError):
+            remaining = True
+    return remaining
+
+
+def _verify_tts_publication(run_dir, wav_bytes, provenance, owned_files):
+    wav_path = Path(run_dir) / "mock-narration.wav"
+    provenance_path = Path(run_dir) / "mock-provenance.json"
+    actual_wav = _read_owned_file(wav_path, MAX_MOCK_WAV_BYTES, owned_files.get(wav_path))
+    if actual_wav != wav_bytes:
+        raise ValueError("published WAV bytes do not match the simulated output")
+    audio_effective, frames, duration_ms = _inspect_mock_wav(actual_wav)
+    if (
+        hashlib.sha256(actual_wav).hexdigest() != provenance["wav_sha256"]
+        or audio_effective != provenance["audio"]
+        or frames != provenance["frames"]
+        or duration_ms != provenance["duration_ms"]
+    ):
+        raise ValueError("published WAV verification does not match provenance")
+
+    provenance_bytes = _read_owned_file(
+        provenance_path, MAX_MOCK_PROVENANCE_BYTES, owned_files.get(provenance_path)
+    )
+    try:
+        parsed_provenance = STORYBOARD_VALIDATOR.parse_json(provenance_bytes.decode("utf-8"))
+    except (UnicodeError, ValueError) as exc:
+        raise ValueError(f"published provenance JSON is invalid: {exc}") from exc
+    if parsed_provenance != provenance:
+        raise ValueError("published provenance JSON does not match the expected simulation")
+    if (
+        parsed_provenance.get("simulation") is not True
+        or parsed_provenance.get("backend") != "mock"
+        or parsed_provenance.get("provider_executed") is not None
+        or parsed_provenance.get("wav_sha256") != hashlib.sha256(actual_wav).hexdigest()
+    ):
+        raise ValueError("published provenance does not verify the mock WAV")
+    entries = {_entry.name for _entry in Path(run_dir).iterdir()}
+    if entries != TTS_SIMULATION_FILES:
+        raise ValueError("publication directory contains unexpected or incomplete files")
+
+
+def save_tts_simulation(config_path):
+    """Generate the existing mock output and publish it under a fixed project-local path."""
+    simulation = simulate_tts(config_path, backend="mock")
+    project_root = Path(config_path).resolve().parent
+    output_root = _ensure_tts_simulation_directory(project_root)
+    run_dir = output_root / f"run-{uuid.uuid4().hex}"
+    owned_files = {}
+    run_identity = None
+    run_created = False
+    try:
+        os.mkdir(run_dir, 0o700)
+        run_created = True
+        run_entry = _inspect_path(run_dir)
+        if run_entry is None or not stat.S_ISDIR(run_entry.st_mode):
+            raise ValueError(f"created run path is not a regular directory: {run_dir}")
+        run_identity = _file_identity(run_entry)
+
+        wav_path = run_dir / "mock-narration.wav"
+        provenance_path = run_dir / "mock-provenance.json"
+        _write_exclusive_file(wav_path, simulation["wav_bytes"], owned_files)
+        wav_check = _read_owned_file(wav_path, MAX_MOCK_WAV_BYTES, owned_files.get(wav_path))
+        audio_effective, frames, duration_ms = _inspect_mock_wav(wav_check)
+        if (
+            wav_check != simulation["wav_bytes"]
+            or audio_effective != simulation["provenance"]["audio"]
+            or frames != simulation["provenance"]["frames"]
+            or duration_ms != simulation["provenance"]["duration_ms"]
+        ):
+            raise ValueError("published WAV does not match the in-memory simulation")
+
+        provenance_bytes = (
+            json.dumps(simulation["provenance"], ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+        ).encode("utf-8")
+        if len(provenance_bytes) > MAX_MOCK_PROVENANCE_BYTES:
+            raise ValueError(f"mock provenance exceeds maximum size of {MAX_MOCK_PROVENANCE_BYTES} bytes")
+        _write_exclusive_file(provenance_path, provenance_bytes, owned_files)
+        _verify_tts_publication(run_dir, simulation["wav_bytes"], simulation["provenance"], owned_files)
+    except Exception as exc:
+        if not run_created:
+            raise
+        retained = _cleanup_tts_publication(run_dir, run_identity, owned_files)
+        if retained:
+            raise ValueError(
+                f"TTS simulation publication failed: {exc}; partial publication retained at {run_dir}"
+            ) from exc
+        raise
+
+    summary = dict(simulation["summary"])
+    summary.update(
+        publication_dir=str(run_dir),
+        wav_path=str(run_dir / "mock-narration.wav"),
+        provenance_path=str(run_dir / "mock-provenance.json"),
+    )
+    return {"summary": summary, "provenance": simulation["provenance"], "publication_dir": str(run_dir)}
+
+
 def _input_fingerprint(config, config_path):
     root = Path(config_path).resolve().parent
     inputs = [("storyboard", config["project"]["storyboard"])]
@@ -1101,6 +1314,11 @@ def main(argv=None):
     )
     simulation_parser.add_argument("config", help="pipeline JSON file; its directory is the project root")
     simulation_parser.add_argument("--backend", choices=sorted(SIMULATION_BACKENDS), required=True)
+    publication_parser = commands.add_parser(
+        "save-tts-simulation",
+        help="publish verified mock WAV and provenance in a new project-local run directory",
+    )
+    publication_parser.add_argument("config", help="pipeline JSON file; its directory is the project root")
     args = parser.parse_args(argv)
 
     if args.command == "validate-manifest":
@@ -1118,6 +1336,15 @@ def main(argv=None):
     if args.command == "simulate-tts":
         try:
             result = simulate_tts(args.config, backend=args.backend)
+        except (OSError, ValueError) as exc:
+            print(json.dumps({"error": str(exc), "simulation": True}, ensure_ascii=False, sort_keys=True))
+            return 1
+        print(json.dumps(result["summary"], ensure_ascii=False, sort_keys=True, indent=2))
+        return 0
+
+    if args.command == "save-tts-simulation":
+        try:
+            result = save_tts_simulation(args.config)
         except (OSError, ValueError) as exc:
             print(json.dumps({"error": str(exc), "simulation": True}, ensure_ascii=False, sort_keys=True))
             return 1

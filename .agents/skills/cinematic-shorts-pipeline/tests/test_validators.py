@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -554,6 +555,13 @@ class SkillValidationTests(unittest.TestCase):
             (root / "SKILL.md").write_text('---\nname: sample-skill\ndescription: "A valid description longer than twenty chars."\n---\n', encoding="utf-8")
             errors = skill_validator.validate(root)
         self.assertTrue(any("missing required file: references/storytelling.md" in error for error in errors))
+
+    def test_skill_validator_requires_tts_publication_tests(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / ROOT.name
+            shutil.copytree(ROOT, root, ignore=shutil.ignore_patterns("test_tts_publication.py"))
+            errors = skill_validator.validate(root)
+        self.assertIn("missing required file: tests/test_tts_publication.py", errors)
 
 
 if __name__ == "__main__":
