@@ -57,7 +57,7 @@ class TtsPublicationTests(unittest.TestCase):
     def test_publishes_verified_wav_and_provenance_to_fixed_run_directory(self):
         result = self.publish()
         run_dir = Path(result["publication_dir"])
-        self.assertEqual(self.publication_root, run_dir.parent)
+        self.assertEqual(self.publication_root.resolve(), run_dir.parent.resolve())
         self.assertTrue(run_dir.name.startswith("run-"))
         wav_path = run_dir / "mock-narration.wav"
         provenance_path = run_dir / "mock-provenance.json"
