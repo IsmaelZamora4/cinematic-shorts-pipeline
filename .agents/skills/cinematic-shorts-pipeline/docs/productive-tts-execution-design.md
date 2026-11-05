@@ -1,10 +1,10 @@
-# Phase 4A — Diseño de ejecución productiva de TTS
+# Phase 4A — Diseño aprobado y evidencia de Phase 4B
 
-**Estado:** Phase 4A aprobada; Phase 4B implementada; suite local y CI multiplataforma aprobados
+**Estado:** Phase 4B implementada, revisada y validada con una inferencia local real; PR #12 abierto; Phase 4C pendiente
 **Fecha:** 2026-11-05
-**Base revisada:** commit 0694b0e083af1bc9fa53d82d57df8b373d5bc0a6
+**Código comprobado:** commit 5541f19315487721606499c4c2af8a2611e7a473
 **Rama de diseño:** design/productive-tts-execution-v0.10
-**PR #11:** estado remoto no verificado desde este checkout
+**PR #12:** mantener abierto; CI multiplataforma confirmado tras las correcciones de auditoría
 
 ## Decisiones aprobadas antes de Phase 4B
 
@@ -14,30 +14,30 @@
 - availability=verified habilita elegibilidad declarativa; worker y padre comprueban runtime, proveedor, modelos, voz, formatos y hashes reales antes de completar etapas.
 - La recuperación comprobada en Phase 4B es consistencia tras interrupción y rechazo de artefactos huérfanos. No incluye resume, reintentos ni adopción automática.
 
-## 1. Estado actual y brechas
+## 1. Línea base anterior a Phase 4B (histórica)
 
 La skill ya valida contratos pipeline v1 y manifiestos v1, calcula fingerprints, planifica un DAG determinista, simula TTS y publica simulaciones. El comando run-tts-kokoro también puede ejecutar una inferencia Kokoro local real mediante un worker fijo.
 
 Ese comando es un piloto independiente. Es deliberadamente estricto: requiere la etapa neutral 03-tts-narration con adapter_status pendiente, publica en .pipeline/tts-local-runs/run-<id>/ y no toca outputs configurados ni manifiestos. Esta conducta se mantiene sin cambios.
 
-El ejecutor productivo no existe. new_pending_manifest solo devuelve un objeto en memoria; validate-manifest valida un archivo existente. La etapa 01 ya declara builtin-validation implementado, pero no materializa validated-plan. El validador de manifiestos acepta completed solo si las dependencias, adaptador, herramientas declaradas, fingerprints y todos los outputs coinciden. La validación de herramienta es estructural: availability=verified por sí sola no inspecciona un runtime.
+En la línea base revisada antes de Phase 4B, el ejecutor productivo no existía. Esa descripción es histórica: Phase 4B ahora crea y verifica validated-plan, ejecuta Kokoro productivo, publica outputs sin sobrescribir y persiste checkpoints en manifest v1. La validación de herramienta sigue siendo estructural en validate-manifest; la ejecución productiva verifica el runtime mediante el worker.
 
-Brechas que Phase 4B/4C resolvería:
+Brechas cerradas por Phase 4B:
 
-- Contrato de elegibilidad productiva para Kokoro, manteniendo Piper declarativo y los contratos heredados intactos.
-- Un artefacto validated-plan determinista que represente contenido validado y tenga entradas cubiertas por el fingerprint de Stage 01.
-- Creación y actualización persistente de un manifiesto v1 con transiciones coherentes.
+- Elegibilidad Kokoro productiva; Piper declarativo y contratos heredados intactos.
+- validated-plan determinista, cubierto por fingerprint de Stage 01.
+- Manifiesto v1 persistente con transiciones coherentes.
 - Ejecución limitada a 01-validate-project y 03-tts-narration.
-- Publicación verificada en las dos rutas configuradas, no en el directorio standalone.
-- Manejo explícito de colisiones, artefactos parciales, cambios concurrentes de inputs y escrituras interrumpidas.
+- Publicación verificada en rutas configuradas, separada del directorio standalone.
+- Manejo explícito de colisiones, artefactos parciales, cambios concurrentes de inputs e interrupciones.
 
-## 2. Arquitectura propuesta
+## 2. Arquitectura implementada en Phase 4B
 
-Añadir un comando dedicado run-productive-tts CONFIG --python ABSOLUTE_PYTHON --model ABSOLUTE_MODEL --voices ABSOLUTE_VOICES. El comando ejecutará solo el subconjunto autorizado 01-validate-project y 03-tts-narration. No será un runner genérico del DAG ni inspeccionará o invocará otros adaptadores. En éxito, 02-blender-scenes, 04-remotion-compose, 05-ffmpeg-finalize y 06-quality-control permanecerán pending.
+El comando dedicado `run-productive-tts CONFIG --python ABSOLUTE_PYTHON --model ABSOLUTE_MODEL --voices ABSOLUTE_VOICES` ejecuta solo el subconjunto autorizado 01-validate-project y 03-tts-narration. No es un runner genérico del DAG ni inspecciona o invoca otros adaptadores. En éxito, 02-blender-scenes, 04-remotion-compose, 05-ffmpeg-finalize y 06-quality-control permanecen pending.
 
 El nuevo comando reutiliza el worker scripts/tts-kokoro-worker.py y el contrato validado de TTS. No lee ejecutables, argumentos, imports, código, descargas ni rutas de modelo desde pipeline.json. Python, modelo y voces continúan como rutas absolutas explícitas de CLI. El script UTF-8 se captura una vez, pasa por stdin al worker y no aparece en argv, logs ni provenance.
 
-run-tts-kokoro sigue como operación standalone con su función y publicaciones actuales. La nueva ruta productiva debe usar una función distinta de orquestación/publicación; se pueden extraer helpers internos comunes si su comportamiento observable standalone queda igual y sus pruebas existentes permanecen válidas.
+`run-tts-kokoro` sigue como operación standalone con su función y publicaciones actuales. La ruta productiva usa una función distinta de orquestación/publicación; puede compartir helpers internos sin cambiar el comportamiento observable standalone.
 
 El runner valida el proyecto completo antes de crear el estado de ejecución; comprueba los outputs configurados y el destino de manifiesto para evitar colisiones; escribe un manifiesto pending; ejecuta y confirma Stage 01; persiste ese checkpoint; ejecuta Kokoro; verifica ambos outputs; actualiza el manifiesto; y llama a la misma validación semántica usada por validate-manifest. Si Stage 01 falla, no inicia TTS. El comando nunca ejecuta otras etapas aunque aparezcan como implemented en la configuración.
 
@@ -199,7 +199,7 @@ La creación del directorio run exclusivo y los reemplazos atómicos del único 
 
 ## 7. Fingerprints y compatibilidad
 
-La función actual stage_fingerprint canonicaliza SHA-256 de un objeto con pipeline_version, profile, el objeto completo de stage, input hashes, las definiciones completas de sus tools y tool_versions efectivos. La propuesta conserva el algoritmo y añade pipeline-config como input pseudo solo para el Stage 01 productivo.
+La función actual stage_fingerprint canonicaliza SHA-256 de un objeto con pipeline_version, profile, el objeto completo de stage, input hashes, las definiciones completas de sus tools y tool_versions efectivos. La implementación conserva el algoritmo y añade pipeline-config como input pseudo solo para el Stage 01 productivo.
 
 | Cambio | Consecuencia con el algoritmo existente | Tratamiento |
 | --- | --- | --- |
@@ -275,7 +275,27 @@ Pruebas unitarias/integración local con procesos worker sustituidos por fakes. 
 | Cross-platform | POSIX symlink tests; Windows junction y reparse tests; symlink omitido solo con WinError 1314 documentado |
 | Sin retries | timeout/error invokes worker una vez, no reintenta ni reutiliza manifiestos/output de corridas anteriores |
 
-Verificación Phase 4B: suite unittest local, 176 pruebas aprobadas y 3 skips por permisos de symlink en Windows; validate-skill.py, pipeline validate/dry-run heredados, cuatro storyboards y git diff --check pasan. CI del PR #12 pasó en Ubuntu 24.04, Ubuntu 26.04 y Windows 2025 para el commit auditado 18d15bf. No se generó audio real.
+Verificación automatizada Phase 4B: suite unittest local, 176 pruebas aprobadas y 3 skips por permisos de symlink en Windows; validate-skill.py, validación/dry-run, cuatro storyboards y git diff --check pasan. La segunda revisión de código corrigió los cuatro hallazgos; CI del PR #12 pasó en Ubuntu 24.04, Ubuntu 26.04 y Windows 2025. Esa evidencia de CI corresponde a pruebas con mocks; no ejecuta inferencia real.
+
+### Validación local real (2026-11-05)
+
+Una ejecución única de `run-productive-tts` usó Python 3.12.10, Kokoro ONNX 0.6.1 y CPUExecutionProvider locales. No se instalaron dependencias ni se descargaron assets. El proyecto temporal quedó fuera del repositorio; no se publicó ni versionó el audio.
+
+| Evidencia | Resultado |
+| --- | --- |
+| `validate` y `dry-run` | PASS; snapshot de rutas y hashes idéntico antes/después. Worker no invocado por estos comandos. |
+| `run-productive-tts` | exit 0; una invocación; tiempo total de CLI 11.416 s |
+| Runtime | Python 3.12.10; kokoro-onnx 0.6.1; onnxruntime 1.31.1; numpy 2.5.4; phonemizer 3.6.0; espeakng-loader 0.2.4; soundfile 0.14.0 |
+| Provider/voz/idioma | CPUExecutionProvider; `em_alex`; `es` |
+| Inicialización/inferencia | 1.527 s / 4.605 s |
+| Modelo ONNX | 325,532,387 bytes; SHA-256 `7d5df8ecf7d4b1878015a32686053fd0eebe2bc377234608764cc0ef3636a6c5` |
+| Voces | 28,214,398 bytes; SHA-256 `bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d` |
+| Worker | SHA-256 `b401f896b6274e6254e37bee242e0c201d9cc60a7f8b7b2d4bc96a636b3940b1` |
+| Audio | WAV mono PCM16, 24 kHz, 121,344 frames, 5.056 s, 242,732 bytes, no silencio ni clipping severo; SHA-256 `a88df2085d7f259e31c1f9126718985a61b9d92ac80489dd3b3d37ce4e4f4bb2` |
+| `validate-manifest` | PASS, cero warnings; hash WAV releído coincide con `provenance.hashes.wav_sha256` |
+| Estados | Stage 01 y 03 `completed`; Stage 02/04/05/06 `pending` |
+
+Artefactos creados solo en el proyecto temporal: `.pipeline/work/validated-plan.json` (4,127 bytes; SHA-256 `2f0232cae31927dd0c12e9ed8b4d2f799ef2f5d4ae3f952e50003015a5b6d557`), `.pipeline/work/narration.wav`, `.pipeline/work/narration-provenance.json` (2,240 bytes; SHA-256 `bbee78ad4966f9189eb98be749813b9916c827195081ae7bc825ddbe2605a224`) y `.pipeline/runs/run-<run-id>/manifest.json` (3,157 bytes; SHA-256 `e63709d2218f0cb947850ab9cb1bd1638f2157b6e67bfc42b82781e8fc98d775`). No se incorporaron rutas locales al diseño.
 
 ## 10. Archivos previstos para Phase 4B y 4C
 
@@ -284,7 +304,7 @@ Verificación Phase 4B: suite unittest local, 176 pruebas aprobadas y 3 skips po
 - scripts/pipeline.py: elegibilidad Kokoro, dependencia productiva exclusiva, pseudoentrada pipeline-config, validated-plan determinista y semánticamente revalidado, SHA-256 WAV post-write, provenance diferenciada, mensaje dry-run read-only correcto, publicación exclusiva y checkpoints manifest v1.
 - tests/test_productive_tts_execution.py: éxito, fallos, WAV PCM alterado con métricas iguales, recibo alterado con hashes recalculados, dependencias extra, estados audiovisuales, dry-run read-only, cambios concurrentes y recuperación sin resume.
 - scripts/tts-kokoro-worker.py: reutilizado sin cambios; la síntesis mantiene un único worker.
-- Regresión local Windows: 176 pruebas; 3 skips por permisos de symlink. Audio de integración sintético. CI multiplataforma del commit auditado: PASS.
+- Regresión local Windows: 176 pruebas; 3 skips por permisos de symlink. CI multiplataforma tras correcciones: PASS. La ejecución local real documentada arriba complementa —no sustituye— las pruebas con mocks.
 
 ### Phase 4C — documentación y gates
 
@@ -309,7 +329,7 @@ No cambiar templates/pipeline.json, examples/cave-exploration/pipeline.json ni e
 
 ## 12. Criterios objetivos de aceptación
 
-Phase 4B conserva estos gates de aceptación:
+Phase 4B conserva estos gates de aceptación; se verificaron en CI, y la ejecución local real anterior confirma el camino productivo en este runtime:
 
 - Un config productivo neutral Kokoro v1 pasa validación únicamente con la combinación de eligibility definida; Piper implemented se rechaza y todos los ejemplos/contratos heredados siguen aceptados.
 - run-productive-tts ejecuta exactamente Stage 01 y TTS, usa el worker fijo con script por stdin y ningún otro proceso, y no modifica comportamiento de comandos existentes.
@@ -325,6 +345,6 @@ Phase 4B conserva estos gates de aceptación:
 
 ## Recomendación
 
-Decisiones de pseudentrada pipeline-config y provenance/versiones ya aprobadas. Phase 4B implementa dos etapas, publicación sin overwrite, un intento, cero retries y cero resume. Phase 4C documentará capacidad final y evidencia CI. Mantener explícita la frontera standalone/productiva y los assets no incluidos.
+Decisiones de pseudentrada pipeline-config y provenance/versiones aprobadas. Phase 4B implementa dos etapas, publicación sin overwrite, un intento, cero retries y cero resume. Recomendación: mantener PR #12 abierto hasta revisar esta evidencia y fusionar solo con aprobación explícita. No iniciar Phase 4C todavía. Mantener explícita la frontera standalone/productiva y los assets no incluidos.
 
-El diseño se contrastó con pipeline.py, el worker y los contratos heredados antes de implementar. Phase 4B conserva pipeline_version=1 y manifest_version=1. Phase 4C sigue pendiente.
+El diseño se contrastó con pipeline.py, el worker y los contratos heredados antes de implementar. Phase 4B conserva pipeline_version=1 y manifest_version=1. Phase 4C sigue pendiente; su alcance documentado permanece separado de esta validación local.
