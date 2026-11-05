@@ -275,7 +275,7 @@ Pruebas unitarias/integración local con procesos worker sustituidos por fakes. 
 | Cross-platform | POSIX symlink tests; Windows junction y reparse tests; symlink omitido solo con WinError 1314 documentado |
 | Sin retries | timeout/error invokes worker una vez, no reintenta ni reutiliza manifiestos/output de corridas anteriores |
 
-Verificación Phase 4B: suite unittest local, 176 pruebas aprobadas y 3 skips por permisos de symlink en Windows; validate-skill.py, pipeline validate/dry-run heredados, cuatro storyboards y git diff --check pasan. CI del PR #12 pasó en Ubuntu 24.04, Ubuntu 26.04 y Windows 2025 antes de esta ronda de auditoría; los nuevos checks multiplataforma quedan pendientes de repetir. No se generó audio real.
+Verificación Phase 4B: suite unittest local, 176 pruebas aprobadas y 3 skips por permisos de symlink en Windows; validate-skill.py, pipeline validate/dry-run heredados, cuatro storyboards y git diff --check pasan. CI del PR #12 pasó en Ubuntu 24.04, Ubuntu 26.04 y Windows 2025 para el commit auditado 18d15bf. No se generó audio real.
 
 ## 10. Archivos previstos para Phase 4B y 4C
 
@@ -284,7 +284,7 @@ Verificación Phase 4B: suite unittest local, 176 pruebas aprobadas y 3 skips po
 - scripts/pipeline.py: elegibilidad Kokoro, dependencia productiva exclusiva, pseudoentrada pipeline-config, validated-plan determinista y semánticamente revalidado, SHA-256 WAV post-write, provenance diferenciada, mensaje dry-run read-only correcto, publicación exclusiva y checkpoints manifest v1.
 - tests/test_productive_tts_execution.py: éxito, fallos, WAV PCM alterado con métricas iguales, recibo alterado con hashes recalculados, dependencias extra, estados audiovisuales, dry-run read-only, cambios concurrentes y recuperación sin resume.
 - scripts/tts-kokoro-worker.py: reutilizado sin cambios; la síntesis mantiene un único worker.
-- Regresión local Windows: 176 pruebas; 3 skips por permisos de symlink. Audio de integración sintético. CI debe repetirse tras esta ronda.
+- Regresión local Windows: 176 pruebas; 3 skips por permisos de symlink. Audio de integración sintético. CI multiplataforma del commit auditado: PASS.
 
 ### Phase 4C — documentación y gates
 
