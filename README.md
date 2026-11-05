@@ -1,158 +1,279 @@
 # Cinematic Shorts Pipeline
 
-**A planning and validation toolkit for cinematic 3D shorts.** It turns an idea into a reviewable brief, story, storyboard, and local pipeline plan, with a Codex skill discoverable inside the repository.
+**A Codex skill and Python toolkit for planning, validating, and locally piloting parts of a cinematic 3D short workflow.** The repository turns a creative brief into reviewable story and storyboard documents, checks versioned production contracts, and includes a standalone local Kokoro speech pilot. The audiovisual production DAG is declared and inspectable; it is not an end-to-end production runner.
 
-[![CI](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/actions/workflows/validate.yml/badge.svg?branch=main)](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/actions/workflows/validate.yml)
+[![GitHub Actions](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/actions/workflows/validate.yml/badge.svg?branch=main)](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/actions/workflows/validate.yml)
 [![MIT License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](.github/workflows/validate.yml)
 [![Codex Skill](https://img.shields.io/badge/Codex-Skill-6f42c1.svg)](.agents/skills/cinematic-shorts-pipeline/SKILL.md)
 
-**Resumen en español:** Skill de Codex y validadores locales para planificar cortos 3D: historia, storyboard, cámara, animación, voz y un DAG de producción. Planifica y valida contratos; no produce medios.
-
-- [Skill](.agents/skills/cinematic-shorts-pipeline/SKILL.md)
-- [Examples](.agents/skills/cinematic-shorts-pipeline/examples)
-- [Roadmap](.agents/skills/cinematic-shorts-pipeline/docs/roadmap.md)
+**Resumen en español:** Skill de Codex y validadores Python para planificar cortos 3D, validar storyboards y contratos de pipeline, y probar voz con Kokoro local mediante un comando independiente. Blender, Remotion, FFmpeg y la ejecución productiva del DAG siguen pendientes.
 
 ## Contents
 
 - [Overview](#overview)
-- [Features](#features)
+- [Current capabilities](#current-capabilities)
+- [Architecture](#architecture)
+- [How the pipeline works](#how-the-pipeline-works)
+- [Installation and requirements](#installation-and-requirements)
 - [Quick start](#quick-start)
-- [How it works](#how-it-works)
+- [Kokoro local TTS pilot](#kokoro-local-tts-pilot)
 - [Examples](#examples)
 - [Validation and testing](#validation-and-testing)
 - [Project structure](#project-structure)
-- [Architecture and contracts](#architecture-and-contracts)
-- [Limitations](#limitations)
+- [Security and design decisions](#security-and-design-decisions)
+- [Current limitations](#current-limitations)
 - [Roadmap](#roadmap)
 - [Contributing and license](#contributing-and-license)
 
 ## Overview
 
-Cinematic Shorts Pipeline is an open-source Codex skill and a small set of local Python validators for planning short-form cinematic 3D projects. It is designed for creators who want a structured production brief, shot-by-shot intent, technical constraints, and review gates before committing to production.
+Planning a short involves linked decisions about story, shots, art direction, motion, voice, timing, tools, and review. This project makes those decisions explicit as documents and versioned data so they can be checked before production work begins.
 
-The project separates **planning** from **audiovisual production**. It can validate storyboard and pipeline data and preview a deterministic DAG. It does not execute production stages or create video, images, audio, voices, 3D models, or renders.
+The repository contains a discoverable Codex skill, examples and templates, and local Python validators. It separates validated plans from production: validators check declared structures and constraints, and `run-tts-kokoro` is the only real speech synthesis command. That command is a local pilot, not execution of the production DAG.
 
-## Features
+## Current capabilities
 
-- **Storytelling:** brief, hook, character goal, obstacle, causal beats, reveal, and ending. See [storytelling guidance](.agents/skills/cinematic-shorts-pipeline/references/storytelling.md).
-- **Cinematic storyboards:** shot purpose, framing, focus, continuity, light source, and cut intent, with optional per-scene `cinematography` data. See [cinematography](.agents/skills/cinematic-shorts-pipeline/references/cinematography.md).
-- **Art direction and animation planning:** visual rules plus optional `animation` beats for rigs, weight, support, root motion, gaze, hands, props, and continuity. These are planning contracts, not rig or motion checks. See [art direction](.agents/skills/cinematic-shorts-pipeline/references/art-direction.md) and [3D animation](.agents/skills/cinematic-shorts-pipeline/references/animation-3d.md).
-- **Voice, captions, and timing:** caption intervals and optional `narrative_timing` anchors for beats, pauses, and cuts. The validator checks declared structure and timing; it does not listen to audio or prove synchronization. See [voice and captions](.agents/skills/cinematic-shorts-pipeline/references/voice-and-captions.md).
-- **Benchmarking and quality review:** reusable protocols for comparing proposals and reviewing story clarity, stills, and sequences. The protocol is not a performance, retention, or audience-preference measurement. See [benchmark plan](.agents/skills/cinematic-shorts-pipeline/docs/benchmark-plan.md) and [cinematic quality rubric](.agents/skills/cinematic-shorts-pipeline/references/cinematic-quality-rubric.md).
-- **Local pipeline planning:** validate a `pipeline_version: 1` DAG, inspect its deterministic order, and validate existing manifests and fingerprints. `plan` and `dry-run` do not execute stages or write files. See [pipeline orchestration](.agents/skills/cinematic-shorts-pipeline/references/pipeline-orchestration.md).
-- **Validation and security:** strict JSON and storyboard validation, project-relative path checks, dependency and output checks, and regression tests for read-only CLI behavior. See [pipeline security](.agents/skills/cinematic-shorts-pipeline/references/pipeline-security.md).
+- **Story development:** brief, premise, character goal, obstacle, stakes, causal beats, reveal, and ending guidance. See [storytelling](.agents/skills/cinematic-shorts-pipeline/references/storytelling.md).
+- **Storyboard planning:** shot intent, framing, focus, continuity, lighting, and cuts. Storyboards use `schema_version: 1`; the validator checks structure and declared timing, not cinematic quality.
+- **Cinematography and animation contracts:** optional per-scene `cinematography` and `animation` data describe camera, lighting, performance beats, support, root motion, gaze, hands, and props. They do not verify rigs or rendered motion. See [cinematography](.agents/skills/cinematic-shorts-pipeline/references/cinematography.md) and [animation planning](.agents/skills/cinematic-shorts-pipeline/references/animation-3d.md).
+- **Voice and timing plans:** explicit UTF-8 voiceover resources, captions, and optional `narrative_timing` anchors. Validation does not prove spoken quality or word-level synchronization. See [voice and captions](.agents/skills/cinematic-shorts-pipeline/references/voice-and-captions.md).
+- **Pipeline and manifest contracts:** validate a `pipeline_version: 1` DAG, preview deterministic dependency waves, and validate an existing `manifest_version: 1` manifest and its fingerprints.
+- **Mock TTS:** `simulate-tts` builds and verifies a silent WAV in memory. `save-tts-simulation` explicitly publishes the mock WAV and provenance under `.pipeline/simulations/tts/`.
+- **Local Kokoro pilot:** `run-tts-kokoro` runs one real CPU synthesis for `em_alex` / `es` and publishes a verified WAV with provenance under `.pipeline/tts-local-runs/`. This is independent of DAG execution.
+- **Regression coverage:** standard-library tests cover validators, pipeline contracts, TTS simulation/publication, and the Kokoro worker through simulated runtime objects.
+
+## Architecture
+
+The planning layer validates project data and previews the graph. Mock TTS and the local Kokoro pilot are separate commands. The pipeline stages shown below are dependencies declared by configuration; the planner does not execute them.
+
+```mermaid
+flowchart TB
+  subgraph Planning["Implemented: skill and validation"]
+    Brief["Creative brief"] --> Story["Story and storyboard"]
+    Story --> Plans["Cinematography, animation, voice, timing"]
+    Plans --> StoryCheck["Skill and storyboard validation"]
+  end
+
+  subgraph Contracts["Implemented: pipeline and manifest checks"]
+    Config["pipeline.json · v1"] --> Validate["validate"]
+    Validate --> Preview["plan / dry-run · read-only"]
+    ExistingManifest["Existing manifest · v1"] --> ManifestCheck["validate-manifest · read-only"]
+    Config --> ManifestCheck
+  end
+
+  subgraph DeclaredDAG["Declared production DAG · not executed"]
+    ProjectCheck["01 Validate project<br/>adapter declared implemented"]
+    Blender["02 Blender scenes<br/>pending"]
+    TTSStage["03 TTS narration adapter<br/>pending"]
+    Remotion["04 Remotion compose<br/>pending"]
+    FFmpeg["05 FFmpeg finalize<br/>pending"]
+    QA["06 Quality control<br/>pending"]
+    ProjectCheck --> Blender
+    ProjectCheck --> TTSStage
+    Blender --> Remotion
+    TTSStage --> Remotion
+    Remotion --> FFmpeg --> QA
+  end
+
+  StoryCheck -. storyboard referenced by config .-> Config
+  Preview -. previews dependencies only .-> ProjectCheck
+
+  subgraph Speech["Implemented separately: local speech commands"]
+    TTSContract["TTS contract and script"] --> Mock["simulate-tts / save-tts-simulation"]
+    TTSContract --> Kokoro["run-tts-kokoro<br/>standalone pilot"]
+  end
+  Config -. standalone command input only .-> TTSContract
+```
+
+The Kokoro command does not connect the local pilot output to the declared TTS stage. The DAG adapter remains `pending`; see [pipeline orchestration](.agents/skills/cinematic-shorts-pipeline/references/pipeline-orchestration.md) for the contract and execution boundaries.
+
+## How the pipeline works
+
+1. Use the [Codex skill](.agents/skills/cinematic-shorts-pipeline/SKILL.md) to turn a brief into a story, art direction, storyboard, and technical plan with review gates.
+2. Validate the storyboard and project-local resources. Optional cinematography, animation, and timing blocks remain planning data.
+3. Describe tools, stage dependencies, inputs, outputs, and adapter states in `pipeline.json`. `plan` and `dry-run` show the declared graph and blockers without running it.
+4. Use the mock commands to inspect or retain simulated TTS output, or explicitly run the standalone Kokoro pilot when a compatible local runtime and assets are available.
+5. Review generated audio manually. No command currently executes the audiovisual DAG or completes a production stage.
+
+| Command | Effect |
+| --- | --- |
+| `validate CONFIG` | Validate pipeline, storyboard, resources, and contracts. |
+| `plan CONFIG` | Show deterministic DAG order and execution waves. |
+| `dry-run CONFIG` | Show planned stages and blockers; does not run them. |
+| `validate-manifest CONFIG MANIFEST` | Validate an existing manifest; does not create or resume a run. |
+| `simulate-tts CONFIG --backend mock` | Verify a mock WAV and provenance in memory; writes nothing. |
+| `save-tts-simulation CONFIG` | Publish mock WAV and JSON provenance in a new local simulation directory. |
+| `run-tts-kokoro CONFIG --python PATH --model PATH --voices PATH` | Run one explicit local Kokoro pilot and publish verified WAV and provenance outside the DAG outputs. |
+
+## Installation and requirements
+
+- **Validation and tests:** Python 3.12 is used in GitHub Actions. The validators and test suite use the Python standard library; no project dependency installation is needed for them.
+- **Codex skill:** open the repository in Codex and invoke `$cinematic-shorts-pipeline`. Codex is not needed to run the validators.
+- **Kokoro pilot:** requires a pre-existing compatible Python environment, `kokoro-onnx` 0.6.1, its runtime dependencies, a local ONNX model, and a local voice file. The worker supports Python 3.10 through 3.13 and refuses other versions. The repository does not bundle or download these assets.
+
+The verified local pilot used Python 3.12.10, `kokoro-onnx` 0.6.1, ONNX Runtime 1.31.1, NumPy 2.5.4, phonemizer 3.6.0, `espeakng-loader` 0.2.4, and SoundFile 0.14.0. These are recorded observations from that runtime, not a lockfile for every environment.
 
 ## Quick start
 
-### Requirements
-
-- Python 3.12 for the version currently used by GitHub Actions.
-- Codex desktop or CLI to invoke the skill. Codex is not needed to run the Python validators.
-- No third-party Python packages are required for the included validation commands.
-
-No Blender, TTS engine, Remotion project, FFmpeg, or media assets are needed to validate the planning package.
-
-### Clone and open in Codex
+Clone the repository and run the validators from its root:
 
 ```bash
 git clone https://github.com/IsmaelZamora4/cinematic-shorts-pipeline.git
 cd cinematic-shorts-pipeline
-```
 
-Open the cloned repository root as a Codex project. The skill lives at `.agents/skills/cinematic-shorts-pipeline/SKILL.md` and can be invoked with:
-
-```text
-$cinematic-shorts-pipeline
-```
-
-Example prompt:
-
-> Use `$cinematic-shorts-pipeline` to plan a 12-second vertical 3D mystery short. Return a brief and a `schema_version: 1` storyboard. Planning only; do not generate media.
-
-### Validate from the repository root
-
-```bash
 python -B .agents/skills/cinematic-shorts-pipeline/scripts/validate-skill.py .agents/skills/cinematic-shorts-pipeline
 python -B -m unittest discover -s .agents/skills/cinematic-shorts-pipeline/tests -v
-python -B .agents/skills/cinematic-shorts-pipeline/scripts/validate-storyboard.py .agents/skills/cinematic-shorts-pipeline/examples/night-station/storyboard.json
 python -B .agents/skills/cinematic-shorts-pipeline/scripts/pipeline.py validate .agents/skills/cinematic-shorts-pipeline/examples/cave-exploration/pipeline.json
+python -B .agents/skills/cinematic-shorts-pipeline/scripts/pipeline.py plan .agents/skills/cinematic-shorts-pipeline/examples/cave-exploration/pipeline.json
 python -B .agents/skills/cinematic-shorts-pipeline/scripts/pipeline.py dry-run .agents/skills/cinematic-shorts-pipeline/examples/cave-exploration/pipeline.json
 ```
 
-`validate-skill.py` checks the skill package, links, JSON, examples, and storyboard template. The unittest command runs the complete suite.
+To use the skill in Codex, open the repository and invoke `$cinematic-shorts-pipeline`, then give it a planning-only request such as:
 
-## How it works
+> Prepare a reviewable package for a 12-second vertical 3D mystery short about a lighthouse whose beam reveals a second moon. Include a brief, story beats, visual direction, storyboard, and technical plan. Planning only; do not generate audio, images, or video.
 
-**Idea → brief → storytelling → storyboard → technical plan → validation → reviewable package**
+To try the mock TTS contract without writing files:
 
-Each stage has an approval gate. The outputs are documents and structured planning data. Passing a validator is not approval to render or produce media; audiovisual work requires separate authorization and review.
+```bash
+python -B .agents/skills/cinematic-shorts-pipeline/scripts/pipeline.py simulate-tts .agents/skills/cinematic-shorts-pipeline/examples/tts-contract/pipeline.json --backend mock
+```
+
+The `tts-contract` example currently declares Piper. It is suitable for contract validation and mock simulation only; it is **not** a Kokoro runtime configuration. See [Kokoro local TTS pilot](#kokoro-local-tts-pilot) before using the real-speech command.
+
+## Kokoro local TTS pilot
+
+`run-tts-kokoro` requires a neutral TTS stage configured with:
+
+- `provider: kokoro`, `voice: em_alex`, and `language: es`;
+- WAV, mono, 24 kHz, PCM 16-bit (`pcm_s16le`);
+- the registered `kokoro` tool and an explicit `voiceover-script` resource;
+- a local Python interpreter, Kokoro ONNX model, and voice file supplied through absolute CLI paths.
+
+Do not pass the Piper example unchanged. The object below is only the `tts` object for the `03-tts-narration` stage. It is not a complete `pipeline.json` and is not a Kokoro-ready template shipped by this repository. Add it to a valid `pipeline_version: 1` project config, register the `kokoro` tool, set the stage's `tools` list to `["kokoro"]`, and retain the required storyboard, script resource, dependency, and output declarations.
+
+```json
+{
+  "provider": "kokoro",
+  "voice": "em_alex",
+  "language": "es",
+  "audio": {
+    "container": "wav",
+    "sample_rate_hz": 24000,
+    "channels": 1,
+    "sample_format": "pcm_s16le"
+  },
+  "script_input": "resource-voiceover-script"
+}
+```
+
+On Windows PowerShell, run the same command with absolute local paths. Replace every `<...>` placeholder with a real path before running:
+
+```powershell
+$Pipeline = "<PROJECT_ROOT>\pipeline-kokoro.json"
+$Python = "<KOKORO_ENV>\Scripts\python.exe"
+$Model = "<LOCAL_ASSETS>\kokoro-v1.0.onnx"
+$Voices = "<LOCAL_ASSETS>\voices-v1.0.bin"
+
+python -B .agents/skills/cinematic-shorts-pipeline/scripts/pipeline.py run-tts-kokoro $Pipeline --python $Python --model $Model --voices $Voices
+```
+
+The command's implemented execution path is:
+
+```mermaid
+flowchart TB
+  Config["Kokoro-compatible config"] --> Validation["run-tts-kokoro<br/>validate pipeline, storyboard, dependency, script"]
+  Script["UTF-8 script resource"] --> Validation
+  Validation --> Worker["Fixed Python worker<br/>script sent on stdin"]
+  Worker --> Kokoro["kokoro-onnx 0.6.1<br/>CPUExecutionProvider"]
+  Kokoro --> Stdout["RIFF/WAVE bytes on stdout"]
+  Stdout --> Verify["Verify WAV, signal, limits, and hashes"]
+  Verify --> Publish["Exclusive local run directory"]
+  Publish --> Result["narration.wav + provenance JSON<br/>standalone; DAG and manifest unchanged"]
+```
+
+Run it with the absolute paths for the local interpreter and assets on your platform:
+
+```bash
+python -B .agents/skills/cinematic-shorts-pipeline/scripts/pipeline.py run-tts-kokoro path/to/pipeline-kokoro.json --python /absolute/path/to/python --model /absolute/path/to/kokoro-v1.0.onnx --voices /absolute/path/to/voices-v1.0.bin
+```
+
+The command validates the pipeline, storyboard, narrative dependency, and the same UTF-8 script bytes before starting a fixed repository worker. The worker receives the script on stdin, uses `kokoro-onnx` directly with `CPUExecutionProvider`, and runs with `shell=False`, a 300-second timeout, and no automatic retry. The parent verifies WAV format, frames, duration, finite and non-silent samples, clipping, size, and SHA-256 hashes before publication.
+
+The pilot is limited to an 8 KiB script, 300 seconds of audio, and a 16 MiB WAV. It publishes `narration.wav` and `narration-provenance.json` in a unique `.pipeline/tts-local-runs/run-<id>/` directory. Provenance records `simulation: false`, the requested and executed provider, voice and language, effective audio properties, hashes, runtime versions, and available timing/memory measurements. It is a standalone local run: it does not write declared production outputs, update a manifest, or mark a DAG stage complete.
+
+One real local CPU pilot with `em_alex` / `es` was validated. It is evidence that the configured local runtime produced a technically valid spoken WAV, not a benchmark or an automated quality/intelligibility assessment. GitHub Actions use test doubles and do not fetch models or run real inference.
 
 ## Examples
 
-All examples are fictional planning packages. They contain no generated audiovisual assets.
+The repository examples are fictional planning packages, not generated media:
 
-- [Cave Exploration — The Rope That Ends](.agents/skills/cinematic-shorts-pipeline/examples/cave-exploration/plan.md): a cut rope and rising water turn an apparently empty cave into an active threat; includes a pipeline configuration.
-- [Forest Storm — Shelter in the Fallen Tree](.agents/skills/cinematic-shorts-pipeline/examples/forest-storm/plan.md): a storm blocks the route, and a lightning flash reveals nearby shelter.
-- [Abandoned Research Station — The Station That Answered](.agents/skills/cinematic-shorts-pipeline/examples/abandoned-research-station/plan.md): a beacon answers from a sealed room in an evacuated polar station.
-- [Night Station — La luz tras el sello](.agents/skills/cinematic-shorts-pipeline/examples/night-station/plan.md): a guard follows wet footprints to a sealed door after a lamp goes out and another light answers.
+- [Cave Exploration](.agents/skills/cinematic-shorts-pipeline/examples/cave-exploration/plan.md): rising water and a cut rope create an immediate threat; includes a legacy pipeline example.
+- [Forest Storm](.agents/skills/cinematic-shorts-pipeline/examples/forest-storm/plan.md): a storm blocks the route, and lightning reveals shelter.
+- [Abandoned Research Station](.agents/skills/cinematic-shorts-pipeline/examples/abandoned-research-station/plan.md): a beacon answers from a sealed room.
+- [Night Station](.agents/skills/cinematic-shorts-pipeline/examples/night-station/plan.md): a guard follows wet footprints to a sealed door.
+- [TTS Contract](.agents/skills/cinematic-shorts-pipeline/examples/tts-contract/pipeline.json): provider-neutral TTS contract, with a Piper declaration for validation/mock use; adapt a copy before the Kokoro pilot.
 
 ## Validation and testing
 
-The project uses the Python standard library. Run the complete suite and package validator with:
+Run the full suite and package validator:
 
 ```bash
 python -B -m unittest discover -s .agents/skills/cinematic-shorts-pipeline/tests -v
 python -B .agents/skills/cinematic-shorts-pipeline/scripts/validate-skill.py .agents/skills/cinematic-shorts-pipeline
 ```
 
-GitHub Actions runs the suite and validators on Ubuntu 24.04 and Ubuntu 26.04 with Python 3.12. For v0.7, both jobs passed all **93 tests**, with no skips or failures. On Windows, **91 passed and 2 symlink tests were skipped** because that environment did not allow creating symbolic links. See the [v0.7 workflow run](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/actions/runs/41921199387).
+The suite contains 154 tests. For PR #9, all three GitHub Actions jobs passed: Ubuntu 24.04 and Ubuntu 26.04 each ran 154 tests with 153 passes and one Windows-only test skipped; Windows 2025 ran 154 tests with no skips or failures. The workflow also validates the skill and examples, checks pipeline configurations and read-only plans, and validates storyboard examples. See the [PR #9 workflow run](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/actions/runs/41980377295).
 
-Automated validation checks declared data and contracts. It does not establish cinematic quality. A still requires visual inspection; continuity, timing, performance, and audio synchronization require real media and sequence review.
+The 17 Kokoro adapter tests use simulated runtime/model files and fakes. CI never downloads Kokoro assets or performs inference. The real local pilot was run separately on the operator's existing runtime and is not part of the 154-test CI suite.
+
+Automated checks validate declared structure and contracts. They do not judge story quality, verify rig compatibility, assess spoken intelligibility, or prove audiovisual synchronization.
 
 ## Project structure
 
 ```text
 .
 ├── .agents/skills/cinematic-shorts-pipeline/
-│   ├── docs/          # Roadmap, examples of process, and benchmark protocol
-│   ├── examples/      # Fictional plans, storyboards, and pipeline example
-│   ├── references/    # Narrative, camera, animation, audio, security, and QA guides
-│   ├── scripts/       # Skill, storyboard, and pipeline validators
-│   ├── templates/     # Versioned storyboard and pipeline templates
-│   └── tests/         # Standard-library regression suite
-├── .github/workflows/ # CI validation matrix
+│   ├── docs/          # Roadmap, sources, examples of process, and benchmark protocol
+│   ├── examples/      # Fictional plans, storyboards, and pipeline contracts
+│   ├── references/    # Narrative, visual, animation, audio, pipeline, and security guides
+│   ├── scripts/       # Skill/storyboard/pipeline validators and fixed Kokoro worker
+│   ├── templates/     # Storyboard and pipeline templates
+│   └── tests/         # Standard-library unit and regression tests
+├── .github/workflows/ # Ubuntu and Windows validation matrix
 ├── deliverables/      # Planning packages
 ├── LICENSE
 └── README.md
 ```
 
-## Architecture and contracts
+## Security and design decisions
 
-- **Storyboard:** `schema_version: 1`. `cinematography`, `animation`, and `narrative_timing` are optional additions; earlier storyboards remain valid.
-- **Pipeline:** `pipeline_version: 1`, independent of storyboard version. A deterministic DAG describes inputs, outputs, dependencies, resource budgets, tools, and adapter status.
-- **Manifest:** `manifest_version: 1` describes a run and records stage states, hashes, fingerprints, and tool versions. The current CLI validates an existing manifest; it does not create or resume runs.
-- **Read-only commands:** `validate`, `plan`, `dry-run`, and `validate-manifest` do not launch production tools. `plan` and `dry-run` only display the declared DAG and blockers.
+- `pipeline_version: 1`, `manifest_version: 1`, legacy stage IDs, and fingerprints are preserved. The TTS provider allowlist is declarative; configuration JSON cannot supply a shell command, module, or script to execute.
+- The four planning and validation commands and `simulate-tts` are read-only. `save-tts-simulation` is an explicit mock publication. `run-tts-kokoro` is an explicit local process operation using a fixed worker and CPU provider.
+- Model, voice, interpreter, and script paths are checked before execution. The pilot hashes the script, WAV, model, and voices and records the results in provenance.
+- Publication uses exclusive run directories and verifies the files after writing. The supported threat model is a trusted local project whose directory parents are not being changed concurrently by hostile processes. This is not a complete TOCTOU defense or a transactional two-file commit.
+- A 300-second worker timeout is enforced. The implementation does not enforce CPU or RAM limits, and the WAV size limit is checked after synthesis; it is not a memory cap. No network isolation is provided.
+- The repository does not bundle Kokoro models, voice files, or other media. Check each third-party asset's license and attribution terms before use or redistribution.
 
-See the [storyboard template](.agents/skills/cinematic-shorts-pipeline/templates/storyboard.json), [pipeline template](.agents/skills/cinematic-shorts-pipeline/templates/pipeline.json), and [technical references](.agents/skills/cinematic-shorts-pipeline/SKILL.md#recursos) for full contracts and guidance.
+## Current limitations
 
-## Limitations
-
-- Production adapters are not implemented. The DAG is a plan, not an execution engine.
-- The project does not automatically generate narration, captions, images, 3D scenes, or videos.
-- Validators do not inspect real footage, verify rig compatibility, judge acting, or measure audiovisual timing and quality.
-- The benchmarking document defines a repeatable comparison protocol; it contains no new performance or retention measurements.
-- Resource availability, versions, compatibility, and licenses must be checked for each project.
+- The DAG is declarative and previewable; there is no production DAG runner, stage scheduling, retry, or recovery implementation.
+- `run-tts-kokoro` is limited to one local provider/voice/language configuration. It does not make the Kokoro DAG adapter `implemented` or mark the TTS stage complete.
+- Piper is a recognized contract provider, not an executable adapter.
+- Blender scene generation, Remotion composition, FFmpeg finalization, production quality control, caption alignment, and complete video generation are not implemented as pipeline executors.
+- Storyboard and timing checks do not establish visual quality, animation continuity, speech intelligibility, or synchronization. The pilot requires human listening review.
+- No effective CPU/RAM/VRAM limits, network isolation, or complete TOCTOU guarantee are provided.
 
 ## Roadmap
 
-- **v0.7 — Benchmarking & Storytelling:** stable on `main`, merged through [PR #4](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/pull/4), squash commit [`530188c`](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/commit/530188cc37c570939b58e5dfbc64190afb7df0f7).
-- **v0.8 — Production Adapters:** planning only. No adapters have been implemented.
+- **v0.8 — TTS contracts and mock publication:** merged through PRs [#6](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/pull/6), [#7](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/pull/7), and [#8](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/pull/8).
+- **v0.9 — Standalone Kokoro local pilot:** merged through [PR #9](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/pull/9). Real local speech generation is available only through the explicit pilot command; production DAG integration remains future work.
+- **Next:** integrate TTS into the DAG with production artifact/state handling, then implement and validate audiovisual stage adapters in separately reviewed phases.
 
-See the [full roadmap](.agents/skills/cinematic-shorts-pipeline/docs/roadmap.md).
+See the [full roadmap](.agents/skills/cinematic-shorts-pipeline/docs/roadmap.md) for phase details.
 
 ## Contributing and license
 
-Contributions are welcome. Keep changes focused, add or update tests for behavior changes, and run the validation commands above before opening a pull request. Include the commands run and distinguish automated validation from any visual or audiovisual review.
+Focused contributions are welcome. For behavior changes, add or update tests, run the validation commands, and report exactly which checks were run. Keep mock tests separate from real-model experiments; do not add model or voice assets to the repository.
 
-The project is distributed under the [MIT License](LICENSE). Models, voices, media, and other third-party resources are not bundled; their licenses and attribution requirements must be checked separately before use.
+The repository is distributed under the [MIT License](LICENSE). The MIT license covers the project files; third-party models, voices, and media have separate license and attribution terms.
