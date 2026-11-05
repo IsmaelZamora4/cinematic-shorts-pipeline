@@ -134,12 +134,18 @@ El plan original proponía integrar el piloto Kokoro al DAG con persistencia/hue
 
 El runner productivo actual solo cubre Stage 01/03 Kokoro. No existe ejecución Blender para escenas, Remotion para composición, FFmpeg para finalizar video, QA audiovisual, alineador de subtítulos, descargador/verificador de licencias, retries, resume ni orquestación audiovisual general. La rúbrica y benchmarks siguen siendo protocolos, no resultados medidos. La generación completa de cortos verticales no está implementada.
 
-## v0.10 — Phase 5A: Blender Productive Adapter Architecture (diseño en revisión)
+## v0.10 — Phase 5A: Blender Productive Adapter Architecture (completada)
 
-- Se prepara un diseño documental para integrar productivamente Blender en Stage 02, preservando Phase 4B, `pipeline_version: 1`, `manifest_version: 1` y sus fingerprints.
-- La propuesta recomienda un ejecutor Stage 02 en el orquestador compartido y un worker Blender fijo, con paquete ZIP único que contenga escenas `.blend`, secuencias PNG verificables, índice y provenance.
-- Stage 02 continúa `pending`; no existe adaptador Blender productivo. No se ejecutó Blender, render ni generación audiovisual durante Phase 5A.
+- El diseño documental aprobado define cómo integrar productivamente Blender en Stage 02, preservando Phase 4B, `pipeline_version: 1`, `manifest_version: 1` y sus fingerprints.
+- Define un ejecutor Stage 02 en el orquestador compartido y un worker Blender fijo, con paquete ZIP único que contiene escenas `.blend`, secuencias PNG verificables, índice y provenance.
+- El diseño se fusionó mediante PR #15. Stage 02 continúa `pending`; no existe adaptador Blender productivo. No se ejecutó Blender, render ni generación audiovisual durante Phase 5A.
 - Diseño actualizado para Phase 5B: Cycles CPU, perfil MVP coherente 540×960/12 FPS/[0,24), 24 PNG, `run-productive-scenes CONFIG --blender ABSOLUTE_PATH`, validación ZIP read-only en streaming y scene spec JSON v1 estricto.
 - Criterio de validación de PNG para Phase 5B: decodificar completamente IDAT/scanlines con límites; rechazar corrupción, truncamiento y errores reales de decodificación aunque las cabeceras sean válidas.
 - El diseño incluye contrato de recursos, seguridad/headless, límites, compatibilidad TTS, manifiesto v1, pruebas mock multiplataforma y gates para Phase 5B/5C.
-- Entregable en revisión: `docs/blender-productive-adapter-design.md`.
+- Contrato aprobado: `docs/blender-productive-adapter-design.md`.
+
+## v0.10 — Phase 5B.1: Compatibility & Productive Blender Profile (en desarrollo)
+
+- Se prepara la elegibilidad de perfil Stage 01 + Stage 02 y la verificación semántica de `validated-plan` para el DAG completo, con Stage 03/04/05/06 pendientes.
+- El CLI `run-productive-scenes CONFIG --blender ABSOLUTE_PATH` queda declarado, pero falla de forma controlada mientras el adaptador real no esté disponible; no invoca Blender ni escribe estado de ejecución.
+- No se implementan worker, decodificador PNG ni publicación de `scene-package` en este incremento.
