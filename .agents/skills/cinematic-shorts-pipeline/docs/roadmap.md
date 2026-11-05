@@ -140,5 +140,6 @@ El runner productivo actual solo cubre Stage 01/03 Kokoro. No existe ejecución 
 - La propuesta recomienda un ejecutor Stage 02 en el orquestador compartido y un worker Blender fijo, con paquete ZIP único que contenga escenas `.blend`, secuencias PNG verificables, índice y provenance.
 - Stage 02 continúa `pending`; no existe adaptador Blender productivo. No se ejecutó Blender, render ni generación audiovisual durante Phase 5A.
 - Diseño actualizado para Phase 5B: Cycles CPU, perfil MVP coherente 540×960/12 FPS/[0,24), 24 PNG, `run-productive-scenes CONFIG --blender ABSOLUTE_PATH`, validación ZIP read-only en streaming y scene spec JSON v1 estricto.
+- Criterio de validación de PNG para Phase 5B: decodificar completamente IDAT/scanlines con límites; rechazar corrupción, truncamiento y errores reales de decodificación aunque las cabeceras sean válidas.
 - El diseño incluye contrato de recursos, seguridad/headless, límites, compatibilidad TTS, manifiesto v1, pruebas mock multiplataforma y gates para Phase 5B/5C.
 - Entregable en revisión: `docs/blender-productive-adapter-design.md`.
