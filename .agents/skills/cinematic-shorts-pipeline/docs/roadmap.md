@@ -170,11 +170,19 @@ El runner productivo actual solo cubre Stage 01/03 Kokoro. No existe ejecución 
 - Pruebas mock cubren preflight, request, cámara (incluida distancia mínima analítica), supervisión y cambios concurrentes de inputs. No se ejecuta Blender ni se generan medios reales.
 - Fuera de alcance de este incremento: decodificación PNG completa (5B.4), ZIP/publicación (5B.5) e integración productiva con gate local independiente (5B.6).
 
-## v0.10 — Phase 5B.4: Strict PNG RGB8 Decoder & Validation (en desarrollo)
+## v0.10 — Phase 5B.4: Strict PNG RGB8 Decoder & Validation (completada)
 
+- Phase 5B.4 se integró en `main` mediante merge commit `e9c81aac72b6834026df932c622c3f667b314d52`.
 - Se añade un decodificador PNG read-only, de biblioteca estándar, para RGB8 no entrelazado a 540×960 y límite de 32 MiB por archivo.
 - Verifica estructura y CRC de chunks, zlib completo/checksum, 960 scanlines exactas y filtros 0–4 mediante reconstrucción incremental con dos filas de trabajo; no conserva el raster completo.
 - Acepta únicamente chunks auxiliares explícitos `cHRM`, `gAMA`, `pHYs`, `sRGB`, `tEXt` y `tIME`, con límites, orden y validación estructural; rechaza los demás chunks no definidos para este perfil.
 - Se mantiene independiente del worker, ZIP y publicación. Stage 02 sigue pending y no se habilita `run-productive-scenes`; no se ejecutan Blender ni renders.
-- Verificación local en Windows/Python 3.12: 249 pruebas; 245 aprobadas y 4 omitidas por permisos de symlink. `validate-skill.py` y `git diff --check` pasan. La ejecución real de Blender no se hizo.
-- GitHub Actions run [42166897234](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/actions/runs/42166897234) pasó para el commit de implementación `6e99e83a0c7a5195ef8bde76fe90578f4232e9c5` en Ubuntu 24.04, Ubuntu 26.04 y Windows 2025. Phase 5B.5 (ZIP/publicación) y el gate local Blender real de 5B.6 siguen pendientes.
+- Validación final de Phase 5B.4 después de auditoría en Windows/Python 3.12: 251 pruebas; 247 aprobadas y 4 omitidas por permisos de symlink. CI del commit aprobado pasó en los tres sistemas. `validate-skill.py` y `git diff --check` pasan. No se ejecutó Blender.
+
+## v0.10 — Phase 5B.5A: Strict Scene Package ZIP Validator (en desarrollo)
+
+- Antes de codificar se documenta el schema cerrado v1 para `package.json` y `provenance.json`, incluidos IDs, hashes, runtime observado, inputs, política efectiva y timeline MVP.
+- Se fija el contrato ZIP classic single-disk sin ZIP64, prefijos/comentarios, encryption, data descriptors ni extra fields; admite STORE/DEFLATE y metadata regular coherente de Windows/Unix.
+- El alcance implementará un validador read-only de 27 miembros con límites previos y durante lectura, CRC/tamaño/SHA de cada miembro, PNG validado por el decoder 5B.4 y comprobación limitada del header `.blend`.
+- Esta fase no crea ZIP productivo, no publica, no integra el validador con `validate-manifest`, no habilita `run-productive-scenes` y no completa Stage 02.
+- Phase 5B.5B (constructor/publicación exclusiva) y el gate local Blender 5.2.3 de Phase 5B.6 siguen pendientes.
