@@ -78,13 +78,48 @@ def _parse_bounded_json(data):
 
 
 def _load_pipeline_validator():
-    pipeline_path = Path(__file__).with_name("pipeline.py")
-    loader_spec = importlib.util.spec_from_file_location("blender_worker_pipeline_contract", pipeline_path)
-    if loader_spec is None or loader_spec.loader is None:
+    scripts_dir = Path(__file__).resolve().parent
+    pipeline_path = scripts_dir / "pipeline.py"
+    if not pipeline_path.is_file():
         raise ValueError("fixed pipeline scene-spec validator is unavailable")
-    module = importlib.util.module_from_spec(loader_spec)
-    loader_spec.loader.exec_module(module)
-    return module
+    sibling_modules = {
+        name: (scripts_dir / f"{name}.py").resolve()
+        for name in ("scene_package_builder", "scene_package_validator", "png_rgb8_decoder")
+    }
+
+    try:
+        # Load required imports explicitly so Blender's other module paths are never searched.
+        for name in ("png_rgb8_decoder", "scene_package_validator", "scene_package_builder"):
+            expected_path = sibling_modules[name]
+            imported = sys.modules.get(name)
+            if imported is not None:
+                imported_path = getattr(imported, "__file__", None)
+                if not isinstance(imported_path, str) or Path(imported_path).resolve() != expected_path:
+                    raise ValueError(f"fixed pipeline dependency {name} is already loaded from another location")
+                continue
+            if not expected_path.is_file():
+                raise ImportError(f"fixed pipeline dependency {name} is missing")
+            dependency_spec = importlib.util.spec_from_file_location(name, expected_path)
+            if dependency_spec is None or dependency_spec.loader is None:
+                raise ImportError(f"fixed pipeline dependency {name} is unavailable")
+            dependency = importlib.util.module_from_spec(dependency_spec)
+            sys.modules[name] = dependency
+            try:
+                dependency_spec.loader.exec_module(dependency)
+            except BaseException:
+                sys.modules.pop(name, None)
+                raise
+            if Path(dependency.__file__).resolve() != expected_path:
+                raise ValueError(f"fixed pipeline dependency {name} did not load from its sibling file")
+
+        loader_spec = importlib.util.spec_from_file_location("blender_worker_pipeline_contract", pipeline_path)
+        if loader_spec is None or loader_spec.loader is None:
+            raise ValueError("fixed pipeline scene-spec validator is unavailable")
+        module = importlib.util.module_from_spec(loader_spec)
+        loader_spec.loader.exec_module(module)
+        return module
+    except ImportError as exc:
+        raise ValueError("fixed pipeline scene-spec validator dependencies are unavailable") from exc
 
 
 def _is_reparse_or_symlink(path_stat):

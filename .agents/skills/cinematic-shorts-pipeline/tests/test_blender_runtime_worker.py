@@ -256,6 +256,72 @@ class BlenderWorkerRequestTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     worker._validate_request(request)
 
+    def test_isolated_worker_loads_fixed_sibling_validators_and_validates_scene_spec(self):
+        scene_spec_path = self.root / "scene-spec.json"
+        scene_spec_path.write_text(json.dumps(make_valid_scene_spec()), encoding="utf-8")
+        isolated_code = r'''
+import importlib.util, json, sys
+from pathlib import Path
+worker_path, scene_spec_path = map(Path, sys.argv[1:3])
+script_dir = worker_path.resolve().parent
+assert Path.cwd() != script_dir
+assert str(script_dir) not in sys.path
+spec = importlib.util.spec_from_file_location("isolated_blender_worker", worker_path)
+worker = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(worker)
+before = list(sys.path)
+validator = worker._load_pipeline_validator()
+assert sys.path == before, "worker did not restore sys.path"
+for name in ("scene_package_builder", "scene_package_validator", "png_rgb8_decoder"):
+    imported = sys.modules[name]
+    assert Path(imported.__file__).resolve() == (script_dir / (name + ".py")).resolve()
+scene = json.loads(scene_spec_path.read_text(encoding="utf-8"))
+storyboard = {"aspect_ratio": "9:16", "fps": 12, "total_frames": 24,
+              "scenes": [{"id": scene["scene_id"], "start_frame": 0, "end_frame": 24}]}
+errors = validator._validate_blender_scene_spec(scene, scene["project_id"], storyboard)
+assert errors == [], errors
+print("ISOLATED_VALID_SCENE_SPEC_PASS")
+'''
+        completed = subprocess.run(
+            [sys.executable, "-I", "-c", isolated_code, str(WORKER_PATH), str(scene_spec_path)],
+            cwd=self.root, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr or completed.stdout)
+        self.assertIn("ISOLATED_VALID_SCENE_SPEC_PASS", completed.stdout)
+
+    def test_isolated_worker_reports_controlled_error_when_sibling_dependency_is_absent(self):
+        isolated_scripts = self.root / "isolated-scripts"
+        isolated_scripts.mkdir()
+        isolated_worker = isolated_scripts / WORKER_PATH.name
+        isolated_worker.write_bytes(WORKER_PATH.read_bytes())
+        (isolated_scripts / "pipeline.py").write_bytes((WORKER_PATH.parent / "pipeline.py").read_bytes())
+        isolated_code = r'''
+import importlib.util, sys
+from pathlib import Path
+worker_path = Path(sys.argv[1])
+script_dir = worker_path.resolve().parent
+assert Path.cwd() != script_dir
+assert str(script_dir) not in sys.path
+spec = importlib.util.spec_from_file_location("isolated_blender_worker", worker_path)
+worker = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(worker)
+before = list(sys.path)
+try:
+    worker._load_pipeline_validator()
+except ValueError as exc:
+    assert "fixed pipeline scene-spec validator dependencies are unavailable" in str(exc), str(exc)
+    assert sys.path == before, "worker did not restore sys.path after import failure"
+    print("CONTROLLED_MISSING_DEPENDENCY_ERROR")
+else:
+    raise AssertionError("missing sibling dependency unexpectedly loaded")
+'''
+        completed = subprocess.run(
+            [sys.executable, "-I", "-c", isolated_code, str(isolated_worker)],
+            cwd=self.root, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr or completed.stdout)
+        self.assertIn("CONTROLLED_MISSING_DEPENDENCY_ERROR", completed.stdout)
+
     def test_worker_parser_rejects_duplicate_keys_nonstandard_numbers_and_oversize(self):
         valid = json.dumps(self.valid_request())
         with self.assertRaisesRegex(ValueError, "duplicate JSON key"):
