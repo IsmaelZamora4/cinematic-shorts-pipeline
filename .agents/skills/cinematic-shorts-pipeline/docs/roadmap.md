@@ -175,7 +175,7 @@ El runner productivo actual solo cubre Stage 01/03 Kokoro. No existe ejecución 
 - Phase 5B.4 se integró en `main` mediante merge commit `e9c81aac72b6834026df932c622c3f667b314d52`.
 - Se añade un decodificador PNG read-only, de biblioteca estándar, para RGB8 no entrelazado a 540×960 y límite de 32 MiB por archivo.
 - Verifica estructura y CRC de chunks, zlib completo/checksum, 960 scanlines exactas y filtros 0–4 mediante reconstrucción incremental con dos filas de trabajo; no conserva el raster completo.
-- Acepta únicamente chunks auxiliares explícitos `cHRM`, `gAMA`, `pHYs`, `sRGB`, `tEXt` y `tIME`, con límites, orden y validación estructural; rechaza los demás chunks no definidos para este perfil.
+- Acepta chunks auxiliares explícitos `cHRM`, `eXIf`, `gAMA`, `oFFs`, `pHYs`, `sRGB`, `tEXt` y `tIME`; `eXIf` tiene límite propio de 4 KiB y validación TIFF/IFD acotada, mientras `oFFs` exige 9 bytes, unit 0/1 y precedencia a IDAT. Los demás mantienen sus límites y validaciones; se rechazan chunks auxiliares desconocidos.
 - Se mantiene independiente del worker, ZIP y publicación. Stage 02 sigue pending y no se habilita `run-productive-scenes`; no se ejecutan Blender ni renders.
 - Validación final de Phase 5B.4 después de auditoría en Windows/Python 3.12: 251 pruebas; 247 aprobadas y 4 omitidas por permisos de symlink. CI del commit aprobado pasó en los tres sistemas. `validate-skill.py` y `git diff --check` pasan. No se ejecutó Blender.
 

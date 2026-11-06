@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from test_pipeline import ROOT
-from test_png_rgb8_decoder import make_png
+from test_png_rgb8_decoder import make_blender_style_png
 
 sys.path.insert(0, str(ROOT / "scripts"))
 import scene_package_builder as builder
@@ -13,11 +13,11 @@ import scene_package_validator as validator
 
 
 class ScenePackageBuilderTests(unittest.TestCase):
-    def test_builds_exact_valid_package_from_staged_files(self):
+    def test_builds_and_validates_27_member_package_with_blender_style_pngs(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             scene_id = "shot-01"
-            frame_data, _ = make_png()
+            frame_data = make_blender_style_png()
             blend = root / "scenes" / scene_id / "scene.blend"
             blend.parent.mkdir(parents=True)
             blend.write_bytes(b"BLENDER17-01v0502" + bytes(128))
