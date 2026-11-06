@@ -818,8 +818,13 @@ def validate_config(data, config_path, captured_resources=None):
         ]
         if scene_stage.get("adapter") != "blender-scenes":
             errors.append("productive scene profile Stage 02 adapter must be blender-scenes")
-        if scene_stage.get("adapter_status") != "pending":
-            errors.append("productive scene profile Stage 02 remains pending until a real adapter is available")
+        scene_status = scene_stage.get("adapter_status")
+        if scene_status == "implemented":
+            blender = tool_by_id.get("blender", {})
+            if blender.get("adapter_status") != "implemented" or blender.get("availability") != "verified":
+                errors.append("productive scene profile requires a verified implemented blender tool")
+        elif scene_status != "pending":
+            errors.append("productive scene profile Stage 02 adapter_status must be pending or implemented")
         if scene_stage.get("depends_on") != ["01-validate-project"]:
             errors.append("productive 02-blender-scenes must depend exclusively on 01-validate-project")
         if scene_stage.get("tools") != ["blender"] or "blender" not in tool_by_id:
@@ -873,7 +878,7 @@ def validate_config(data, config_path, captured_resources=None):
             errors.append("productive scene profile Stage 01 inputs must contain pipeline-config, storyboard, and all required resources only")
 
         for stage_id in (TTS_NARRATION_STAGE_ID, LEGACY_NARRATION_STAGE_ID,
-                         "02-blender-scenes", "04-remotion-compose", "05-ffmpeg-finalize", "06-quality-control"):
+                         "04-remotion-compose", "05-ffmpeg-finalize", "06-quality-control"):
             stage = by_id.get(stage_id)
             if stage is not None and stage_id != "01-validate-project" and stage.get("adapter_status") != "pending":
                 errors.append(f"productive scene profile requires {stage_id}.adapter_status to remain pending")
@@ -2295,7 +2300,7 @@ def _is_productive_scenes_config(config):
         or set(validation_inputs) != required_inputs or len(validation_inputs) != len(required_inputs)
         or not isinstance(stage01.get("outputs"), list)
         or [item.get("id") for item in stage01["outputs"] if isinstance(item, dict)] != ["validated-plan"]
-        or stage02.get("adapter") != "blender-scenes" or stage02.get("adapter_status") != "pending"
+        or stage02.get("adapter") != "blender-scenes" or stage02.get("adapter_status") not in {"pending", "implemented"}
         or stage02.get("depends_on") != ["01-validate-project"]
         or not isinstance(scene_inputs, list)
         or any(not isinstance(item, str) for item in scene_inputs)
@@ -2309,9 +2314,13 @@ def _is_productive_scenes_config(config):
     profile = config.get("profile")
     if not isinstance(profile, dict) or (profile.get("width"), profile.get("height"), profile.get("fps")) != (540, 960, 12):
         return False
+    if stage02["adapter_status"] == "implemented":
+        blender = next((tool for tool in config["tools"] if tool["id"] == "blender"), None)
+        if blender is None or blender.get("adapter_status") != "implemented" or blender.get("availability") != "verified":
+            return False
     return all(
         stage_id == "01-validate-project" or stage.get("adapter_status") == "pending"
-        for stage_id, stage in by_id.items()
+        for stage_id, stage in by_id.items() if stage_id != "02-blender-scenes"
     )
 
 
@@ -2989,7 +2998,9 @@ def validate_manifest(manifest, config, config_path, manifest_path):
     productive_tts = _is_productive_tts_config(config)
     productive_scenes = _is_productive_scenes_config(config)
     if productive_tts or productive_scenes:
-        pending_stage_ids = {"02-blender-scenes", "04-remotion-compose", "05-ffmpeg-finalize", "06-quality-control"}
+        pending_stage_ids = {"04-remotion-compose", "05-ffmpeg-finalize", "06-quality-control"}
+        if productive_tts or configured["02-blender-scenes"]["adapter_status"] == "pending":
+            pending_stage_ids.add("02-blender-scenes")
         if productive_scenes:
             pending_stage_ids.update(NARRATION_STAGE_IDS.intersection(configured))
         for stage_id in pending_stage_ids:

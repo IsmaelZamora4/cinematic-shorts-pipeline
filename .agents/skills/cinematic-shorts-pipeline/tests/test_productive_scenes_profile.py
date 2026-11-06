@@ -217,16 +217,32 @@ class ProductiveScenesProfileTests(unittest.TestCase):
         self.write_config()
         self.assertTrue(any("one storyboard scene covering [0,24)" in error for error in self.errors()))
 
-    def test_rejects_stage_02_or_downstream_adapter_activation_in_5b1(self):
+    def test_rejects_unverified_stage_02_or_downstream_adapter_activation(self):
         scenes = next(stage for stage in self.config["stages"] if stage["id"] == "02-blender-scenes")
         scenes["adapter_status"] = "implemented"
         self.write_config()
-        self.assertTrue(any("Stage 02 remains pending" in error for error in self.errors()))
+        self.assertTrue(any("verified implemented blender" in error for error in self.errors()))
 
         scenes["adapter_status"] = "pending"
         next(stage for stage in self.config["stages"] if stage["id"] == "03-kokoro-narration")["adapter_status"] = "implemented"
         self.write_config()
         self.assertTrue(any("remain pending" in error for error in self.errors()))
+
+    def test_productive_scene_profile_requires_verified_implemented_blender(self):
+        scenes = next(stage for stage in self.config["stages"] if stage["id"] == "02-blender-scenes")
+        blender = next(tool for tool in self.config["tools"] if tool["id"] == "blender")
+        scenes["adapter_status"] = "implemented"
+        for availability, status in (("not_checked", "pending"), ("verified", "pending"), ("not_checked", "implemented")):
+            with self.subTest(availability=availability, status=status):
+                blender.update(availability=availability, adapter_status=status)
+                self.write_config()
+                self.assertTrue(any("verified implemented blender" in error for error in self.errors()))
+        blender.update(availability="verified", adapter_status="implemented")
+        self.write_config()
+        loaded, errors, _, _ = pipeline.load_and_validate_config(self.config_path)
+        self.assertEqual([], errors)
+        self.assertTrue(pipeline._is_productive_scenes_config(loaded))
+        self.assertEqual("pending", next(stage for stage in loaded["stages"] if stage["id"] == "03-kokoro-narration")["adapter_status"])
 
     def test_rejects_ineligible_stage_01_contract(self):
         validation = next(stage for stage in self.config["stages"] if stage["id"] == "01-validate-project")
@@ -352,7 +368,7 @@ class ProductiveScenesProfileTests(unittest.TestCase):
         manifest_path = self.root / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         errors, _ = pipeline.validate_manifest_file(self.config_path, manifest_path)
-        self.assertTrue(any("Stage 02 remains pending" in error for error in errors), errors)
+        self.assertTrue(any("Stage 02 adapter must be blender-scenes" in error for error in errors), errors)
 
     def test_cli_is_a_controlled_unavailable_failure_without_writes_or_processes(self):
         before = sorted(path.relative_to(self.root).as_posix() for path in self.root.rglob("*"))
