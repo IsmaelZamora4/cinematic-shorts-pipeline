@@ -33,6 +33,9 @@ REQUIRED = [
     "tests/test_tts_kokoro.py",
     "examples/tts-contract/pipeline.json", "examples/tts-contract/storyboard.json",
     "examples/tts-contract/voiceover-script.txt",
+    "examples/blender-scene-spec-v1/pipeline.json",
+    "examples/blender-scene-spec-v1/storyboard.json",
+    "examples/blender-scene-spec-v1/scene-spec.json",
     "references/pipeline-orchestration.md",
 ]
 LINK = re.compile(r'!?\[[^\]]*\]\((<[^>]+>|[^)\s]+)(?:\s+"[^"]*")?\)')

@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "title": "Bronze Orbit",
+  "aspect_ratio": "9:16",
+  "fps": 12,
+  "total_frames": 24,
+  "logline": "A bronze orb turns through a narrow shaft of light as the camera makes a slow, deliberate arc.",
+  "voiceover": {
+    "provider": "local or selected provider",
+    "duration_ms": 1800,
+    "timing_status": "estimated"
+  },
+  "captions": [],
+  "scenes": [
+    {
+      "id": "bronze-orbit",
+      "start_frame": 0,
+      "end_frame": 24,
+      "purpose": "Reveal the orb's form and metallic color through a controlled camera move.",
+      "action": "A small bronze orb hangs motionless while a soft area light defines its curved surface.",
+      "framing": "Vertical medium close-up with negative space above and below the orb.",
+      "camera": "Slow linear arc from frame 0 to frame 23; no retiming.",
+      "lighting": "One warm area key light against a black world background."
+    }
+  ]
+}

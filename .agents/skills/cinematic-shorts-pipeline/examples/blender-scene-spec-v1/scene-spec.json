@@ -1,0 +1,56 @@
+{
+  "scene_spec_version": 1,
+  "project_id": "bronze-orbit-demo",
+  "scene_id": "bronze-orbit",
+  "render": {
+    "width": 540,
+    "height": 960,
+    "fps": 12,
+    "start_frame": 0,
+    "end_frame_exclusive": 24,
+    "engine": "CYCLES",
+    "device": "CPU",
+    "samples": 8,
+    "threads": 2,
+    "seed": 31415,
+    "denoising": false,
+    "image_format": "PNG_RGB8_SRGB"
+  },
+  "materials": [
+    {
+      "id": "warm-bronze",
+      "base_color_linear_rgba": [0.6, 0.25, 0.08, 1.0],
+      "metallic": 0.35,
+      "roughness": 0.4
+    }
+  ],
+  "objects": [
+    {
+      "id": "floating-orb",
+      "primitive": "uv_sphere",
+      "material_id": "warm-bronze",
+      "location_m": [0.0, 0.0, 0.0],
+      "rotation_rad": [0.0, 0.0, 0.0],
+      "scale": [0.8, 0.8, 0.8]
+    }
+  ],
+  "camera": {
+    "lens_mm": 35,
+    "interpolation": "LINEAR",
+    "keyframes": [
+      {"frame": 0, "location_m": [0.0, -5.0, 2.0], "target_m": [0.0, 0.0, 0.0]},
+      {"frame": 23, "location_m": [0.15, -4.75, 2.1], "target_m": [0.0, 0.0, 0.0]}
+    ]
+  },
+  "lights": [
+    {
+      "id": "softbox-key",
+      "type": "AREA",
+      "location_m": [2.0, -3.0, 4.0],
+      "target_m": [0.0, 0.0, 0.0],
+      "color_linear_rgb": [1.0, 0.82, 0.64],
+      "power_w": 350,
+      "size_m": 2.0
+    }
+  ]
+}
