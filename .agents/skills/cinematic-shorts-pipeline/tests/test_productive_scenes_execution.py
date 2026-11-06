@@ -50,7 +50,7 @@ class ProductiveScenesExecutionTests(unittest.TestCase):
         scene_id = request["scene_spec"]["scene_id"]
         blend = root / "scenes" / scene_id / "scene.blend"
         blend.parent.mkdir(parents=True)
-        blend.write_bytes(b"BLENDER_v502" + bytes(128))
+        blend.write_bytes(b"BLENDER17-01v0502" + bytes(128))
         frames = blend.parent / "frames"
         frames.mkdir()
         outputs = [f"scenes/{scene_id}/scene.blend"]

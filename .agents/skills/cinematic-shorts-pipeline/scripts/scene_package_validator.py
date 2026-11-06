@@ -26,6 +26,7 @@ MAX_COMPRESSION_RATIO = 100
 IO_CHUNK_BYTES = 64 * 1024
 MAX_MEMBER_NAME_BYTES = 65535
 MAX_CENTRAL_DIRECTORY_BYTES = MAX_MEMBER_COUNT * (46 + MAX_MEMBER_NAME_BYTES)
+UNCOMPRESSED_BLEND_52_HEADER = b"BLENDER17-01v0502"
 
 PROJECT_SLUG = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -440,7 +441,7 @@ def _validate_package_json(value, limits):
     first = _exact_object(payloads[0], {"role", "path", "size_bytes", "sha256"}, "package.json payloads[0]")
     if first["role"] != "scene-blend" or first["path"] != expected_blend:
         _fail("package.json first payload must be the declared scene.blend")
-    size = _require_int(first["size_bytes"], "scene.blend size_bytes", 12, limits.max_blend_bytes)
+    size = _require_int(first["size_bytes"], "scene.blend size_bytes", len(UNCOMPRESSED_BLEND_52_HEADER), limits.max_blend_bytes)
     digest = _require_sha256(first["sha256"], "scene.blend sha256")
     parsed_payloads.append({"path": expected_blend, "size_bytes": size, "sha256": digest, "role": "scene-blend"})
 
@@ -653,18 +654,13 @@ def _consume_member(archive, info, member, expected_size, expected_sha, limits, 
                     raise ScenePackageValidationError(f"PNG member {member.name} failed strict RGB8 decoding") from exc
             elif kind == "blend":
                 header = bytearray()
-                while len(header) < 12:
-                    block = reader.read(12 - len(header))
+                while len(header) < len(UNCOMPRESSED_BLEND_52_HEADER):
+                    block = reader.read(len(UNCOMPRESSED_BLEND_52_HEADER) - len(header))
                     if not block:
-                        _fail("scene.blend is shorter than its 12-byte header")
+                        _fail("scene.blend is shorter than its 17-byte uncompressed header")
                     header.extend(block)
-                if (
-                    bytes(header[:7]) != b"BLENDER"
-                    or header[7] not in (ord("-"), ord("_"))
-                    or header[8] not in (ord("v"), ord("V"))
-                    or header[9:12] != b"502"
-                ):
-                    _fail("scene.blend magic, architecture marker, or version header is invalid")
+                if bytes(header) != UNCOMPRESSED_BLEND_52_HEADER:
+                    _fail("scene.blend uncompressed Blender 5.2 header is invalid")
                 while reader.read(IO_CHUNK_BYTES):
                     pass
             else:
