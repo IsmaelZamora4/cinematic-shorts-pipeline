@@ -177,4 +177,4 @@ El runner productivo actual solo cubre Stage 01/03 Kokoro. No existe ejecución 
 - Acepta únicamente chunks auxiliares explícitos `cHRM`, `gAMA`, `pHYs`, `sRGB`, `tEXt` y `tIME`, con límites, orden y validación estructural; rechaza los demás chunks no definidos para este perfil.
 - Se mantiene independiente del worker, ZIP y publicación. Stage 02 sigue pending y no se habilita `run-productive-scenes`; no se ejecutan Blender ni renders.
 - Verificación local en Windows/Python 3.12: 249 pruebas; 245 aprobadas y 4 omitidas por permisos de symlink. `validate-skill.py` y `git diff --check` pasan. La ejecución real de Blender no se hizo.
-- CI multiplataforma para esta rama está pendiente. Phase 5B.5 (ZIP/publicación) y el gate local Blender real de 5B.6 siguen pendientes.
+- GitHub Actions run [42166897234](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/actions/runs/42166897234) pasó para el commit de implementación `6e99e83a0c7a5195ef8bde76fe90578f4232e9c5` en Ubuntu 24.04, Ubuntu 26.04 y Windows 2025. Phase 5B.5 (ZIP/publicación) y el gate local Blender real de 5B.6 siguen pendientes.
