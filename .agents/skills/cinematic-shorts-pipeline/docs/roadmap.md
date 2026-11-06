@@ -183,6 +183,9 @@ El runner productivo actual solo cubre Stage 01/03 Kokoro. No existe ejecución 
 
 - Antes de codificar se documenta el schema cerrado v1 para `package.json` y `provenance.json`, incluidos IDs, hashes, runtime observado, inputs, política efectiva y timeline MVP.
 - Se fija el contrato ZIP classic single-disk sin ZIP64, prefijos/comentarios, encryption, data descriptors ni extra fields; admite STORE/DEFLATE y metadata regular coherente de Windows/Unix.
-- El alcance implementará un validador read-only de 27 miembros con límites previos y durante lectura, CRC/tamaño/SHA de cada miembro, PNG validado por el decoder 5B.4 y comprobación limitada del header `.blend`.
+- El módulo `scene_package_validator.py` implementa validación read-only de 27 miembros: preflight acotado del directorio, comparación de headers local/central, rutas e inventario exactos, límites previos y durante lectura, CRC/tamaño/SHA-256 y JSON UTF-8 estricto sin claves duplicadas o desconocidas.
+- Los 24 PNG se decodifican incrementalmente mediante el decoder 5B.4 reutilizado; el `.blend` se consume y hashea completo y solo se comprueba su cabecera/versionado, sin afirmar que Blender pueda abrirlo.
+- La API acepta un `ScenePackageContext` externo para comparar IDs, run, fingerprints, hashes de inputs, identidad observada del runtime y SHA-256 del ZIP declarado por el manifiesto. Sin ese contexto, el resultado acredita únicamente integridad y consistencia interna.
+- Las pruebas usan ZIP/PNG sintéticos y cubren corrupción de miembros/CRC, metadata inconsistente, rutas, duplicados, esquemas JSON, contradicciones semánticas, límites y contexto. No ejecutan Blender ni producen medios.
 - Esta fase no crea ZIP productivo, no publica, no integra el validador con `validate-manifest`, no habilita `run-productive-scenes` y no completa Stage 02.
 - Phase 5B.5B (constructor/publicación exclusiva) y el gate local Blender 5.2.3 de Phase 5B.6 siguen pendientes.
