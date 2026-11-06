@@ -142,7 +142,7 @@ class BlenderWorkerCameraTests(unittest.TestCase):
 
 
 class BlenderWorkerRuntimeTests(unittest.TestCase):
-    def test_main_reaches_actual_bpy_version_check(self):
+    def run_main_until_scene_configuration(self, version, version_string, version_cycle):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             request = {
@@ -153,16 +153,31 @@ class BlenderWorkerRuntimeTests(unittest.TestCase):
             request_path = root / "request.json"
             request_path.write_text(json.dumps(request), encoding="utf-8")
             bpy = types.SimpleNamespace(app=types.SimpleNamespace(
-                version=(5, 2, 3), version_string="5.2.3", version_cycle="release",
+                version=version, version_string=version_string, version_cycle=version_cycle,
                 build_options=types.SimpleNamespace(cycles=True),
             ))
             with (
                 mock.patch.dict(sys.modules, {"bpy": bpy, "mathutils": types.SimpleNamespace(Vector=object)}),
-                mock.patch.object(worker, "_configure_scene", side_effect=RuntimeError("version accepted")) as configure,
+                mock.patch.object(worker, "_configure_scene", side_effect=RuntimeError("scene configuration reached")) as configure,
             ):
-                with self.assertRaisesRegex(RuntimeError, "version accepted"):
+                try:
                     worker.main(["--request", str(request_path)])
-            configure.assert_called_once()
+                except RuntimeError as error:
+                    return configure.call_count, error
+                return configure.call_count, None
+
+    def test_main_accepts_numeric_version_when_release_display_string_has_lts_suffix(self):
+        calls, error = self.run_main_until_scene_configuration((5, 2, 3), "5.2.3 LTS", "release")
+        self.assertEqual(1, calls)
+        self.assertRegex(str(error), "scene configuration reached")
+
+    def test_main_rejects_numeric_version_mismatch_and_prerelease_cycle(self):
+        calls, error = self.run_main_until_scene_configuration((5, 2, 4), "5.2.4", "release")
+        self.assertEqual(0, calls)
+        self.assertRegex(str(error), "differs from preflight version")
+        calls, error = self.run_main_until_scene_configuration((5, 2, 3), "5.2.3 Alpha", "alpha")
+        self.assertEqual(0, calls)
+        self.assertRegex(str(error), "prerelease or development")
 
     def test_blender_52_channelbags_set_camera_and_seed_interpolation(self):
         slot = object()
@@ -318,10 +333,11 @@ class BlenderWorkerParentTests(unittest.TestCase):
         }
         (staging_root / "response.json").write_text(json.dumps(response), encoding="utf-8")
 
-    def test_parent_builds_fixed_command_and_accepts_only_verified_staging_receipt(self):
+    def test_parent_accepts_normalized_numeric_version_string_and_verified_staging_receipt(self):
         with mock.patch.object(pipeline, "_run_blender_process", side_effect=self.successful_worker_run) as run:
             result = pipeline._run_blender_scenes_worker(self.config_path, self.runtime)
         self.assertEqual("pending", result["stage_02_status"])
+        self.assertEqual("5.2.3", result["response"]["blender_version_string"])
         self.assertEqual(list(range(24)), result["response"]["frames"])
         staging_root = Path(result["staging_root"])
         expected_root = (self.root / ".pipeline" / "work" / "blender-scenes").resolve()

@@ -16,7 +16,6 @@ MAX_RESPONSE_BYTES = 64 * 1024
 MIN_CAMERA_TARGET_DISTANCE_M = 0.01
 CAMERA_UP_WORLD = (0.0, 0.0, 1.0)
 WORKER_VERSION = 1
-BLENDER_VERSION_PATTERN = re.compile(r"Blender (\d+)\.(\d+)\.(\d+)")
 # Blender stores many RNA properties as float32; allow its rounding, not policy changes.
 FLOAT_REL_TOL = 1e-6
 FLOAT_ABS_TOL = 1e-7
@@ -554,14 +553,11 @@ def main(argv=None):
             request_bytes = stream.read(MAX_REQUEST_BYTES + 1)
         request = _validate_request(_parse_bounded_json(request_bytes))
         observed_version = tuple(bpy.app.version)
-        observed_version_string = str(bpy.app.version_string)
         if observed_version != tuple(request["expected_blender_version"]):
             raise RuntimeError("Blender bpy.app.version differs from preflight version")
         if getattr(bpy.app, "version_cycle", None) != "release":
             raise RuntimeError("Blender prerelease or development runtime is unsupported")
-        parsed_worker_version = BLENDER_VERSION_PATTERN.fullmatch(f"Blender {observed_version_string}")
-        if parsed_worker_version is None or tuple(int(value) for value in parsed_worker_version.groups()) != observed_version:
-            raise RuntimeError("Blender bpy.app.version_string is malformed or inconsistent")
+        observed_version_string = ".".join(str(component) for component in observed_version)
         if not bool(bpy.app.build_options.cycles):
             raise RuntimeError("this Blender build does not include Cycles")
         scene, camera_obj, output_dir, frames_dir, samples, minimum_distance = _configure_scene(
