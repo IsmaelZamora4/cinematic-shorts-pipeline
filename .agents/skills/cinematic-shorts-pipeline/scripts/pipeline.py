@@ -18,6 +18,9 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
+from scene_package_builder import build_scene_package
+from scene_package_validator import MAX_ARCHIVE_BYTES, ScenePackageContext, validate_scene_package
+
 
 PIPELINE_VERSION = 1
 MANIFEST_VERSION = 1
@@ -2247,13 +2250,16 @@ def _intends_productive_scenes_config(config):
     if not isinstance(stage02, dict):
         return False
     profile = config.get("profile") if isinstance(config, dict) else None
-    has_scene_timeline = isinstance(profile, dict) and profile.get("fps") == 12
-    has_scene_timeline = has_scene_timeline or any(
-        isinstance(resource, dict) and resource.get("kind") == "blender-scene-spec"
-        for resource in resources
-    ) if isinstance(resources, list) else has_scene_timeline
-    if stage02.get("adapter_status") == "implemented" and has_scene_timeline:
+    if stage02.get("adapter_status") == "implemented" and isinstance(profile, dict) and profile.get("fps") == 12:
         return True
+    if stage02.get("adapter_status") == "implemented" and stage02.get("adapter") == "blender-scenes":
+        outputs = stage02.get("outputs", [])
+        if isinstance(outputs, list) and any(
+            isinstance(output, dict) and isinstance(output.get("path"), str)
+            and PurePosixPath(output["path"]).suffix.lower() == ".zip"
+            for output in outputs
+        ):
+            return True
     inputs = stage02.get("inputs", [])
     has_scene_spec_input = isinstance(inputs, list) and "resource-scene-spec" in inputs
     if isinstance(resources, list) and any(
@@ -2974,6 +2980,9 @@ def validate_manifest(manifest, config, config_path, manifest_path):
                 resolved = _path(root, artifact_path, f"{artifact_label}.path", errors, required_file=True)
                 if resolved is not None and resolved.is_file():
                     try:
+                        if artifact_id == "scene-package" and resolved.suffix.lower() == ".zip" and resolved.stat().st_size > MAX_ARCHIVE_BYTES:
+                            errors.append(f"{artifact_label} scene-package exceeds ZIP size limit")
+                            continue
                         if sha256_file(resolved) != digest:
                             errors.append(f"{artifact_label} artifact hash does not match the file")
                     except OSError as exc:
@@ -3029,6 +3038,22 @@ def validate_manifest(manifest, config, config_path, manifest_path):
                         _verify_validated_plan(plan_bytes, config, config_path, waves)
                     except (OSError, ValueError) as exc:
                         errors.append(f"manifest validated-plan does not match current project semantics: {exc}")
+        scene_entry = stage_entries.get("02-blender-scenes")
+        if productive_scenes and isinstance(scene_entry, dict) and scene_entry.get("status") == "completed":
+            try:
+                artifact = next(item for item in scene_entry["artifacts"] if item["id"] == "scene-package")
+                version_text = scene_entry["tool_versions"]["blender"]
+                runtime_record = STORYBOARD_VALIDATOR.parse_json(version_text)
+                if not isinstance(runtime_record, dict):
+                    raise ValueError("Blender tool version must contain runtime identity JSON")
+                archive_path = _path(root, artifact["path"], "manifest scene-package path", errors, required_file=True)
+                if archive_path is None:
+                    raise ValueError("scene-package path is invalid")
+                context = _scene_package_context(config, config_path, manifest, artifact["sha256"], runtime_record)
+                with archive_path.open("rb") as stream:
+                    validate_scene_package(stream, expected_context=context)
+            except (KeyError, StopIteration, TypeError, OSError, ValueError) as exc:
+                errors.append(f"manifest scene-package does not match current project context: {exc}")
     return errors, warnings
 
 
@@ -3125,18 +3150,227 @@ def _print_plan(config, waves):
         print("Production adapters are not executable; the TTS contract is declarative only.")
 
 
+def _validated_scene_spec_for_package(config, config_path):
+    root = Path(config_path).resolve().parent
+    resource = next(item for item in config["project"]["resources"] if item["kind"] == "blender-scene-spec")
+    spec_path = root.joinpath(*PurePosixPath(resource["path"]).parts)
+    spec_data = _read_bounded_regular_file(spec_path, MAX_BLENDER_SCENE_SPEC_BYTES, "blender-scene-spec")
+    storyboard_path = root.joinpath(*PurePosixPath(config["project"]["storyboard"]).parts)
+    storyboard_data = _read_bounded_regular_file(storyboard_path, MAX_PRODUCTIVE_STORYBOARD_BYTES, "storyboard")
+    spec = STORYBOARD_VALIDATOR.parse_json(spec_data.decode("utf-8", errors="strict"))
+    storyboard = STORYBOARD_VALIDATOR.parse_json(storyboard_data.decode("utf-8", errors="strict"))
+    errors = _validate_blender_scene_spec(spec, config["project"]["id"], storyboard)
+    if errors:
+        raise ValueError("scene spec changed during execution: " + "; ".join(errors))
+    return spec
+
+
+def _scene_package_context(config, config_path, manifest, archive_digest, runtime_record):
+    stage01 = manifest["stages"]["01-validate-project"]
+    stage02 = manifest["stages"]["02-blender-scenes"]
+    plan_artifact = next(item for item in stage01["artifacts"] if item["id"] == "validated-plan")
+    input_hashes = _project_input_hashes(config, config_path)
+    input_hashes = {key: input_hashes[key] if key in input_hashes else plan_artifact["sha256"]
+                    for key in _productive_stage(config, "02-blender-scenes")["inputs"]}
+    spec = _validated_scene_spec_for_package(config, config_path)
+    return ScenePackageContext(
+        project_id=config["project"]["id"], scene_id=spec["scene_id"], run_id=manifest["run_id"],
+        stage_01_fingerprint=stage01["stage_fingerprint"],
+        stage_02_fingerprint=stage02["stage_fingerprint"],
+        input_hashes=input_hashes, runtime=runtime_record,
+        expected_render_seed=spec["render"]["seed"],
+        manifest_scene_package_sha256=archive_digest,
+    )
+
+
+def _copy_exclusive_archive(source, destination):
+    owned = {}
+    source_entry = _inspect_path(source)
+    if source_entry is None or not stat.S_ISREG(source_entry.st_mode) or source_entry.st_size > MAX_ARCHIVE_BYTES:
+        raise ValueError("staged scene package is absent, unsafe, or oversized")
+    source_identity = _file_identity(source_entry)
+    if source_identity is None:
+        raise ValueError("staged scene package identity cannot be verified")
+    destination_parent = _inspect_path(Path(destination).parent)
+    if destination_parent is None or not stat.S_ISDIR(destination_parent.st_mode):
+        raise ValueError("scene package destination parent is unsafe")
+    with Path(source).open("rb") as reader, Path(destination).open("xb") as writer:
+        if _file_identity(os.fstat(reader.fileno())) != source_identity:
+            raise ValueError("staged scene package identity changed")
+        destination_identity = _file_identity(os.fstat(writer.fileno()))
+        if destination_identity is None:
+            raise ValueError("published scene package identity cannot be verified")
+        owned[Path(destination)] = destination_identity
+        copied = 0
+        for chunk in iter(lambda: reader.read(64 * 1024), b""):
+            copied += len(chunk)
+            if copied > MAX_ARCHIVE_BYTES:
+                raise ValueError("scene package exceeds ZIP size limit during publication")
+            writer.write(chunk)
+        writer.flush()
+        os.fsync(writer.fileno())
+    source_after = _inspect_path(source)
+    if source_after is None or _file_identity(source_after) != source_identity:
+        raise ValueError("staged scene package identity changed during publication")
+    return owned
+
+
+def _write_scene_checkpoint(path, manifest, expected_identity):
+    current = _inspect_path(path)
+    if expected_identity is None:
+        if current is not None:
+            raise ValueError("manifest destination already exists")
+    elif current is None or not stat.S_ISREG(current.st_mode) or _file_identity(current) != expected_identity:
+        raise ValueError("manifest identity changed before checkpoint")
+    _atomic_manifest_write(path, manifest)
+    written = _inspect_path(path)
+    identity = _file_identity(written) if written is not None and stat.S_ISREG(written.st_mode) else None
+    if identity is None:
+        raise ValueError("manifest checkpoint identity could not be verified")
+    return identity
+
+
 def run_productive_scenes(config_path, *, blender_path):
-    """Preflight explicit Blender, then fail closed until package publication is available."""
-    config, errors, _, _ = load_and_validate_config(config_path)
+    """Execute Stage 01 and Stage 02 with verified exclusive ZIP publication."""
+    config, errors, _, waves = load_and_validate_config(config_path)
     if errors:
         raise ValueError("invalid productive scenes profile: " + "; ".join(errors))
-    if not _is_productive_scenes_config(config):
-        raise ValueError("run-productive-scenes requires the productive Stage 01 + Stage 02 profile")
+    if not _is_productive_scenes_config(config) or _productive_stage(config, "02-blender-scenes")["adapter_status"] != "implemented":
+        raise ValueError("run-productive-scenes requires the implemented productive Stage 01 + Stage 02 profile")
+    root = Path(config_path).resolve().parent
+    stage01 = _productive_stage(config, "01-validate-project")
+    stage02 = _productive_stage(config, "02-blender-scenes")
+    plan_path = _productive_paths(root, stage01)["validated-plan"]
+    archive_path = _productive_paths(root, stage02)["scene-package"]
+    if str(plan_path).casefold() == str(archive_path).casefold():
+        raise ValueError("productive outputs collide")
+    for path in (plan_path, archive_path):
+        _preflight_productive_path(path, "productive output")
+    manifest_components = tuple(PurePosixPath(config["workspace"]["manifest_dir"]).parts)
+    run_id = str(uuid.uuid4())
+    run_dir = root.joinpath(*manifest_components) / f"run-{run_id}"
+    manifest_path = run_dir / "manifest.json"
+    _preflight_productive_path(manifest_path, "manifest destination")
     runtime = _preflight_blender_runtime(blender_path)
-    raise ValueError(
-        "productive Blender scenes execution is not available until package validation and publication "
-        f"are implemented; Blender {runtime['version_string']} preflight passed; no worker was launched"
-    )
+    input_hashes, input_entries = _productive_snapshot(config, config_path)
+    plan = _validated_plan(config, config_path, waves, input_entries, input_hashes)
+    plan_bytes = (json.dumps(plan, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    if len(plan_bytes) > MAX_VALIDATED_PLAN_BYTES:
+        raise ValueError("validated-plan exceeds its size limit")
+    _ensure_project_output_directory(root, manifest_components)
+    try:
+        os.mkdir(run_dir, 0o700)
+    except FileExistsError as exc:
+        raise ValueError(f"manifest run directory already exists: {run_dir}") from exc
+    manifest = new_pending_manifest(config, config_path)
+    manifest["run_id"] = run_id
+    plan_owned = {}
+    archive_owned = {}
+    worker_started = False
+    manifest_identity = None
+    try:
+        manifest_identity = _write_scene_checkpoint(manifest_path, manifest, manifest_identity)
+        _ensure_project_output_directory(root, tuple(plan_path.relative_to(root).parts[:-1]))
+        _write_exclusive_file(plan_path, plan_bytes, plan_owned)
+        verified_plan = _read_owned_file(plan_path, MAX_VALIDATED_PLAN_BYTES, plan_owned[plan_path])
+        _verify_validated_plan(verified_plan, config, config_path, waves)
+        plan_hash = hashlib.sha256(verified_plan).hexdigest()
+        stage01_hashes = {key: input_hashes[key] for key in stage01["inputs"]}
+        manifest["stages"][stage01["id"]].update(
+            status="completed", attempts=1,
+            artifacts=[{"id": "validated-plan", "path": stage01["outputs"][0]["path"], "sha256": plan_hash}],
+            stage_fingerprint=stage_fingerprint(config, stage01, stage01_hashes, {}),
+        )
+        manifest_identity = _write_scene_checkpoint(manifest_path, manifest, manifest_identity)
+        _assert_productive_config_unchanged(config, config_path)
+        if _productive_snapshot(config, config_path)[0] != input_hashes:
+            raise ValueError("project inputs changed before Blender execution")
+        worker_started = True
+        worker = _run_blender_scenes_worker(config_path, runtime)
+        _assert_productive_config_unchanged(config, config_path)
+        if _productive_snapshot(config, config_path)[0] != input_hashes:
+            raise ValueError("project inputs changed while Blender was running")
+        spec = _validated_scene_spec_for_package(config, config_path)
+        response = worker["response"]
+        if response["scene_id"] != spec["scene_id"]:
+            raise ValueError("Blender worker scene ID differs from current scene spec")
+        worker_path, worker_hash, _ = _blender_worker_path()
+        runtime_record = {
+            "blender_version": list(response["blender_version"]),
+            "blender_version_string": response["blender_version_string"],
+            "blender_version_cycle": "release", "blender_executable_sha256": runtime["sha256"],
+            "worker_version": response["worker_version"], "worker_sha256": worker_hash,
+        }
+        tool_version = json.dumps(runtime_record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        stage02_hashes = {key: input_hashes[key] for key in stage02["inputs"] if key != "validated-plan"}
+        stage02_hashes["validated-plan"] = plan_hash
+        stage02_fingerprint = stage_fingerprint(config, stage02, stage02_hashes, {"blender": tool_version})
+        observed = {key: response[key] for key in (
+            "frames", "minimum_camera_target_distance_m", "render_seconds", "worker_seconds",
+        )}
+        staged_archive = Path(worker["staging_root"]) / "scene-package.zip"
+        archive_digest = build_scene_package(
+            worker["staging_root"], staged_archive, project_id=config["project"]["id"],
+            scene_id=spec["scene_id"], run_id=run_id, runtime=runtime_record,
+            input_hashes=stage02_hashes, stage_01_fingerprint=manifest["stages"][stage01["id"]]["stage_fingerprint"],
+            stage_02_fingerprint=stage02_fingerprint, render_seed=spec["render"]["seed"], observed=observed,
+        )
+        candidate = {"status": "completed", "attempts": 1, "error": None,
+                     "depends_on": stage02["depends_on"], "artifacts": [
+                         {"id": "scene-package", "path": stage02["outputs"][0]["path"], "sha256": archive_digest}],
+                     "stage_fingerprint": stage02_fingerprint, "tool_versions": {"blender": tool_version}}
+        candidate_manifest = dict(manifest, stages={**manifest["stages"], stage02["id"]: candidate})
+        context = _scene_package_context(config, config_path, candidate_manifest, archive_digest, runtime_record)
+        with staged_archive.open("rb") as stream:
+            validate_scene_package(stream, expected_context=context)
+        _assert_productive_config_unchanged(config, config_path)
+        if _productive_snapshot(config, config_path)[0] != input_hashes:
+            raise ValueError("project inputs changed before scene package publication")
+        if _hash_local_runtime_file(runtime["path"], "Blender executable", 1024 * 1024 * 1024)[1] != runtime["sha256"]:
+            raise ValueError("Blender executable changed before scene package publication")
+        if _hash_local_runtime_file(worker_path, "Blender scenes worker", 4 * 1024 * 1024)[1] != worker_hash:
+            raise ValueError("Blender scenes worker changed before scene package publication")
+        _ensure_project_output_directory(root, tuple(archive_path.relative_to(root).parts[:-1]))
+        _preflight_productive_path(archive_path, "scene package output")
+        archive_owned = _copy_exclusive_archive(staged_archive, archive_path)
+        if _file_identity(_inspect_path(archive_path)) != archive_owned[archive_path]:
+            raise ValueError("published scene package identity changed")
+        with archive_path.open("rb") as stream:
+            validate_scene_package(stream, expected_context=context)
+        if _file_identity(_inspect_path(archive_path)) != archive_owned[archive_path]:
+            raise ValueError("published scene package identity changed during validation")
+        _assert_productive_config_unchanged(config, config_path)
+        if _productive_snapshot(config, config_path)[0] != input_hashes:
+            raise ValueError("project inputs changed before manifest checkpoint")
+        manifest["stages"][stage02["id"]] = candidate
+        manifest_identity = _write_scene_checkpoint(manifest_path, manifest, manifest_identity)
+        final_errors, final_warnings = validate_manifest_file(config_path, manifest_path)
+        if final_errors or final_warnings:
+            raise ValueError("final scene manifest validation failed: " + "; ".join(final_errors + final_warnings))
+        return {"manifest_path": str(manifest_path), "run_id": run_id,
+                "stages": {key: value["status"] for key, value in manifest["stages"].items()}}
+    except (Exception, KeyboardInterrupt) as exc:
+        scene_entry = manifest["stages"][stage02["id"]]
+        validation_entry = manifest["stages"][stage01["id"]]
+        reason = str(exc).strip() or type(exc).__name__
+        changed_inputs = "project inputs changed" in str(exc) or "pipeline config changed" in str(exc)
+        if validation_entry["status"] == "pending" or changed_inputs:
+            for owned_path, identity in plan_owned.items():
+                _remove_owned_file(owned_path, identity)
+            validation_entry.update(status="failed", attempts=1, error=reason[:500],
+                                    artifacts=[], stage_fingerprint=None, tool_versions={})
+            scene_entry.update(status="failed" if worker_started else "blocked",
+                               attempts=1 if worker_started else 0, error=reason[:500],
+                               artifacts=[], stage_fingerprint=None, tool_versions={})
+        else:
+            scene_entry.update(status="failed" if worker_started else "blocked",
+                               attempts=1 if worker_started else 0, error=reason[:500],
+                               artifacts=[], stage_fingerprint=None, tool_versions={})
+        try:
+            _write_scene_checkpoint(manifest_path, manifest, manifest_identity)
+        except (OSError, ValueError) as persist_exc:
+            raise ValueError(f"productive scenes failed and failure manifest could not be persisted: {persist_exc}") from exc
+        raise
 
 
 def main(argv=None):

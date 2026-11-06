@@ -179,6 +179,16 @@ class ProductiveScenesProfileTests(unittest.TestCase):
         self.write_config()
         self.assertTrue(any("productive scene profile" in error for error in self.errors()))
 
+    def test_implemented_blender_zip_cannot_bypass_scene_profile_by_renaming_output(self):
+        shutil.copyfile(ROOT / "templates" / "storyboard.json", self.root / "storyboard.json")
+        config = make_config(self.root)
+        stage = next(item for item in config["stages"] if item["id"] == "02-blender-scenes")
+        stage["adapter_status"] = "implemented"
+        stage["outputs"] = [{"id": "other-package", "path": ".pipeline/work/scenes.zip"}]
+        self.config = config
+        self.write_config()
+        self.assertTrue(any("productive scene profile" in error for error in self.errors()))
+
     def test_rejects_ambiguous_multiple_scene_spec_declarations(self):
         second = dict(self.config["project"]["resources"][0], id="scene-spec-secondary", path="scene-spec-secondary.json")
         self.config["project"]["resources"].append(second)
@@ -370,7 +380,7 @@ class ProductiveScenesProfileTests(unittest.TestCase):
         errors, _ = pipeline.validate_manifest_file(self.config_path, manifest_path)
         self.assertTrue(any("Stage 02 adapter must be blender-scenes" in error for error in errors), errors)
 
-    def test_cli_is_a_controlled_unavailable_failure_without_writes_or_processes(self):
+    def test_cli_rejects_legacy_pending_profile_without_writes_or_processes(self):
         before = sorted(path.relative_to(self.root).as_posix() for path in self.root.rglob("*"))
         blender_path = self.fake_blender_executable()
         before = sorted(path.relative_to(self.root).as_posix() for path in self.root.rglob("*"))
@@ -383,12 +393,15 @@ class ProductiveScenesProfileTests(unittest.TestCase):
             result = pipeline.main(["run-productive-scenes", str(self.config_path), "--blender", str(blender_path)])
         after = sorted(path.relative_to(self.root).as_posix() for path in self.root.rglob("*"))
         self.assertEqual(1, result)
-        self.assertIn("execution is not available", output.getvalue())
-        self.assertIn("Blender 5.2.3 preflight passed", output.getvalue())
-        self.assertEqual(1, probe.call_count)
+        self.assertIn("requires the implemented productive", output.getvalue())
+        self.assertEqual(0, probe.call_count)
         self.assertEqual(before, after)
 
     def test_cli_rejects_relative_blender_path_without_starting_anything(self):
+        next(stage for stage in self.config["stages"] if stage["id"] == "02-blender-scenes")["adapter_status"] = "implemented"
+        next(tool for tool in self.config["tools"] if tool["id"] == "blender").update(
+            adapter_status="implemented", availability="verified")
+        self.write_config()
         output = io.StringIO()
         with mock.patch.object(pipeline, "_run_blender_version_probe", side_effect=AssertionError("Blender must not start")), contextlib.redirect_stdout(output):
             result = pipeline.main(["run-productive-scenes", str(self.config_path), "--blender", "blender"])

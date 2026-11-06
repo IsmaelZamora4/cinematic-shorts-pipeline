@@ -179,7 +179,9 @@ El runner productivo actual solo cubre Stage 01/03 Kokoro. No existe ejecución 
 - Se mantiene independiente del worker, ZIP y publicación. Stage 02 sigue pending y no se habilita `run-productive-scenes`; no se ejecutan Blender ni renders.
 - Validación final de Phase 5B.4 después de auditoría en Windows/Python 3.12: 251 pruebas; 247 aprobadas y 4 omitidas por permisos de symlink. CI del commit aprobado pasó en los tres sistemas. `validate-skill.py` y `git diff --check` pasan. No se ejecutó Blender.
 
-## v0.10 — Phase 5B.5A: Strict Scene Package ZIP Validator (en desarrollo)
+## v0.10 — Phase 5B.5A: Strict Scene Package ZIP Validator (completada)
+
+- Integrada en `main` mediante merge commit `41406c2b42ebe7ce449c7977dc02dfd6f60017ad` (PR #21).
 
 - Antes de codificar se documenta el schema cerrado v1 para `package.json` y `provenance.json`, incluidos IDs, hashes, runtime observado, inputs, política efectiva y timeline MVP.
 - Se fija el contrato ZIP classic single-disk sin ZIP64, prefijos/comentarios, encryption, data descriptors ni extra fields; admite STORE/DEFLATE y metadata regular coherente de Windows/Unix.
@@ -188,4 +190,11 @@ El runner productivo actual solo cubre Stage 01/03 Kokoro. No existe ejecución 
 - La API acepta un `ScenePackageContext` externo para comparar IDs, run, fingerprints, hashes de inputs, identidad observada del runtime, seed autorizada del Scene Spec validado y SHA-256 del ZIP declarado por el manifiesto. Sin ese contexto, el resultado acredita únicamente integridad y consistencia interna.
 - Las pruebas usan ZIP/PNG sintéticos y cubren corrupción de miembros/CRC, metadata inconsistente, rutas, duplicados, esquemas JSON, contradicciones semánticas, límites y contexto. No ejecutan Blender ni producen medios.
 - Esta fase no crea ZIP productivo, no publica, no integra el validador con `validate-manifest`, no habilita `run-productive-scenes` y no completa Stage 02.
-- Phase 5B.5B (constructor/publicación exclusiva) y el gate local Blender 5.2.3 de Phase 5B.6 siguen pendientes.
+- El constructor/publicación exclusiva de Phase 5B.5B se implementa en una rama separada para auditoría independiente. El gate local Blender 5.2.3 de Phase 5B.6 sigue pendiente.
+
+## v0.10 — Phase 5B.5B: ZIP Builder, Exclusive Publication & Stage 02 Integration (en auditoría)
+
+- El perfil productivo permite Stage 02 `implemented` solo con Scene Spec v1, DAG/outputs exactos y Blender declarado `implemented/verified`; conserva el perfil heredado `pending` y Kokoro Phase 4B.
+- El padre reutiliza Stage 01 y el worker fijo, construye ZIP classic de 27 miembros desde staging sin cargar los medios completos en memoria, valida con contexto externo, publica exclusivamente, relee el ZIP y persiste Stage 02 `completed` solo tras verificación.
+- `validate-manifest` comprueba el paquete de escenas en streaming y sin escrituras, extracción ni procesos. Stage 03/04/05/06 permanecen `pending`; no hay retry/resume ni adopción de huérfanos.
+- La suite sintética no acredita ejecución real de Blender ni openability del `.blend`. Phase 5B.6 reserva el gate local opt-in con Blender 5.2.3.
