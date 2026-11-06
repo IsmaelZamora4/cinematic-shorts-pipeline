@@ -1,2 +1,4 @@
 /.agents/skills/cinematic-shorts-pipeline.zip
 .pipeline/
+__pycache__/
+*.py[cod]
