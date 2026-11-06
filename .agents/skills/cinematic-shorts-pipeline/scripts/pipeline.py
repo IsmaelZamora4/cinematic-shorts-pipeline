@@ -55,6 +55,7 @@ MAX_KOKORO_DURATION_SECONDS = 300
 MAX_KOKORO_PROVENANCE_BYTES = 64 * 1024
 MAX_VALIDATED_PLAN_BYTES = 1024 * 1024
 MAX_PRODUCTIVE_STORYBOARD_BYTES = 4 * 1024 * 1024
+MAX_BLENDER_SCENE_SPEC_BYTES = 64 * 1024
 KOKORO_TIMEOUT_SECONDS = 300
 TTS_SAMPLE_RATES = {16000, 22050, 24000, 32000, 44100, 48000}
 TTS_SAMPLE_FORMATS = {"pcm_s16le", "pcm_s24le", "pcm_f32le"}
@@ -124,6 +125,223 @@ def _integer(value, label, errors, minimum, maximum=None):
         errors.append(f"{label} must be <= {maximum}")
         return False
     return True
+
+
+def _scene_spec_number(value, label, errors, minimum, maximum):
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        errors.append(f"{label} must be a finite number from {minimum} to {maximum}")
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        errors.append(f"{label} must be a finite number from {minimum} to {maximum}")
+        return None
+    if value < minimum or value > maximum:
+        errors.append(f"{label} must be from {minimum} to {maximum}")
+        return None
+    return value
+
+
+def _scene_spec_vector(value, label, size, minimum, maximum, errors):
+    if not isinstance(value, list) or len(value) != size:
+        errors.append(f"{label} must contain exactly {size} numbers")
+        return None
+    result = []
+    valid = True
+    for index, item in enumerate(value):
+        number = _scene_spec_number(item, f"{label}[{index}]", errors, minimum, maximum)
+        if number is None:
+            valid = False
+        else:
+            result.append(number)
+    return result if valid else None
+
+
+def _validate_blender_scene_spec(spec, project_id, storyboard):
+    errors = []
+    if not _object(
+        spec, "scene spec", ["scene_spec_version", "project_id", "scene_id", "render", "materials", "objects", "camera", "lights"], [], errors,
+    ):
+        return errors
+
+    version = spec.get("scene_spec_version")
+    if not isinstance(version, int) or isinstance(version, bool) or version != 1:
+        errors.append("scene spec scene_spec_version must be integer 1")
+    if _string(spec.get("project_id"), "scene spec project_id", errors, SLUG) and spec["project_id"] != project_id:
+        errors.append("scene spec project_id must match pipeline project.id")
+    if not _string(spec.get("scene_id"), "scene spec scene_id", errors, SLUG):
+        scene_id = None
+    else:
+        scene_id = spec["scene_id"]
+
+    if isinstance(storyboard, dict):
+        scenes = storyboard.get("scenes")
+        if not isinstance(scenes, list) or len(scenes) != 1 or not isinstance(scenes[0], dict):
+            errors.append("scene spec requires exactly one storyboard scene")
+        else:
+            if scene_id is not None and scenes[0].get("id") != scene_id:
+                errors.append("scene spec scene_id must match the only storyboard scene id")
+            if scenes[0].get("start_frame") != 0 or scenes[0].get("end_frame") != 24:
+                errors.append("scene spec storyboard scene must cover [0,24)")
+
+    render_fields = [
+        "width", "height", "fps", "start_frame", "end_frame_exclusive", "engine", "device",
+        "samples", "threads", "seed", "denoising", "image_format",
+    ]
+    render = spec.get("render")
+    if _object(render, "scene spec render", render_fields, [], errors):
+        fixed_integers = {
+            "width": 540, "height": 960, "fps": 12, "start_frame": 0,
+            "end_frame_exclusive": 24, "samples": 8, "threads": 2,
+        }
+        for key, expected in fixed_integers.items():
+            value = render.get(key)
+            if not isinstance(value, int) or isinstance(value, bool):
+                errors.append(f"scene spec render.{key} must be integer {expected}")
+            elif value != expected:
+                errors.append(f"scene spec render.{key} must equal {expected}")
+        _integer(render.get("seed"), "scene spec render.seed", errors, 0, 2147483647)
+        for key, expected in {
+            "engine": "CYCLES", "device": "CPU", "image_format": "PNG_RGB8_SRGB",
+        }.items():
+            if render.get(key) != expected:
+                errors.append(f"scene spec render.{key} must equal {expected}")
+        if render.get("denoising") is not False:
+            errors.append("scene spec render.denoising must be false")
+        if isinstance(storyboard, dict):
+            if render.get("fps") != storyboard.get("fps"):
+                errors.append("scene spec render.fps must match storyboard.fps")
+            scenes = storyboard.get("scenes")
+            if isinstance(scenes, list) and scenes and isinstance(scenes[0], dict):
+                if render.get("start_frame") != scenes[0].get("start_frame"):
+                    errors.append("scene spec render.start_frame must match storyboard scene start_frame")
+            if render.get("end_frame_exclusive") != storyboard.get("total_frames"):
+                errors.append("scene spec render.end_frame_exclusive must match storyboard.total_frames")
+
+    declared_ids = set()
+    material_ids = set()
+    materials = spec.get("materials")
+    if not isinstance(materials, list):
+        errors.append("scene spec materials must be an array")
+    elif not 1 <= len(materials) <= 12:
+        errors.append("scene spec materials must contain from 1 to 12 entries")
+    else:
+        for index, material in enumerate(materials):
+            label = f"scene spec materials[{index}]"
+            if not _object(material, label, ["id", "base_color_linear_rgba", "metallic", "roughness"], [], errors):
+                continue
+            material_id = material.get("id")
+            if _string(material_id, f"{label}.id", errors, SLUG):
+                if material_id in declared_ids:
+                    errors.append(f"{label}.id has duplicate id {material_id}")
+                declared_ids.add(material_id)
+                material_ids.add(material_id)
+            _scene_spec_vector(material.get("base_color_linear_rgba"), f"{label}.base_color_linear_rgba", 4, 0, 1, errors)
+            _scene_spec_number(material.get("metallic"), f"{label}.metallic", errors, 0, 1)
+            _scene_spec_number(material.get("roughness"), f"{label}.roughness", errors, 0.05, 1)
+
+    objects = spec.get("objects")
+    if not isinstance(objects, list):
+        errors.append("scene spec objects must be an array")
+    elif not 1 <= len(objects) <= 24:
+        errors.append("scene spec objects must contain from 1 to 24 entries")
+    else:
+        for index, scene_object in enumerate(objects):
+            label = f"scene spec objects[{index}]"
+            if not _object(scene_object, label, ["id", "primitive", "material_id", "location_m", "rotation_rad", "scale"], [], errors):
+                continue
+            object_id = scene_object.get("id")
+            if _string(object_id, f"{label}.id", errors, SLUG):
+                if object_id in declared_ids:
+                    errors.append(f"{label}.id has duplicate id {object_id}")
+                declared_ids.add(object_id)
+            primitive = scene_object.get("primitive")
+            if not isinstance(primitive, str) or primitive not in {"cube", "uv_sphere", "cylinder", "plane"}:
+                errors.append(f"{label}.primitive is unsupported")
+            material_id = scene_object.get("material_id")
+            if not _string(material_id, f"{label}.material_id", errors, SLUG) or material_id not in material_ids:
+                errors.append(f"{label}.material_id must reference a declared material id")
+            _scene_spec_vector(scene_object.get("location_m"), f"{label}.location_m", 3, -20, 20, errors)
+            _scene_spec_vector(scene_object.get("rotation_rad"), f"{label}.rotation_rad", 3, -6.28319, 6.28319, errors)
+            _scene_spec_vector(scene_object.get("scale"), f"{label}.scale", 3, 0.05, 10, errors)
+
+    camera = spec.get("camera")
+    if _object(camera, "scene spec camera", ["lens_mm", "interpolation", "keyframes"], [], errors):
+        _scene_spec_number(camera.get("lens_mm"), "scene spec camera.lens_mm", errors, 24, 50)
+        if camera.get("interpolation") != "LINEAR":
+            errors.append("scene spec camera.interpolation must equal LINEAR")
+        keyframes = camera.get("keyframes")
+        if not isinstance(keyframes, list) or len(keyframes) != 2:
+            errors.append("scene spec camera.keyframes must contain exactly two keyframes")
+        else:
+            frames = []
+            positions = []
+            targets = []
+            for index, keyframe in enumerate(keyframes):
+                label = f"scene spec camera.keyframes[{index}]"
+                if not _object(keyframe, label, ["frame", "location_m", "target_m"], [], errors):
+                    continue
+                frame = keyframe.get("frame")
+                if not isinstance(frame, int) or isinstance(frame, bool):
+                    errors.append(f"{label}.frame must be an integer")
+                else:
+                    frames.append(frame)
+                location = _scene_spec_vector(keyframe.get("location_m"), f"{label}.location_m", 3, -20, 20, errors)
+                target = _scene_spec_vector(keyframe.get("target_m"), f"{label}.target_m", 3, -20, 20, errors)
+                positions.append(location)
+                targets.append(target)
+                if location is not None and target is not None and math.dist(location, target) <= 0.01:
+                    errors.append(f"{label} camera-target distance must be greater than 0.01 m")
+            if frames and frames != [0, 23]:
+                errors.append("scene spec camera.keyframes must use frames 0 and 23 in order")
+            if len(positions) == 2 and all(value is not None for value in positions) and len(targets) == 2 and all(value is not None for value in targets):
+                camera_moved = math.dist(positions[0], positions[1]) >= 0.01 or math.dist(targets[0], targets[1]) >= 0.01
+                if not camera_moved:
+                    errors.append("scene spec camera must move by at least 0.01 m between keyframes")
+
+    lights = spec.get("lights")
+    if not isinstance(lights, list):
+        errors.append("scene spec lights must be an array")
+    elif not 1 <= len(lights) <= 3:
+        errors.append("scene spec lights must contain from 1 to 3 entries")
+    else:
+        for index, light in enumerate(lights):
+            label = f"scene spec lights[{index}]"
+            if not _object(light, label, ["id", "type", "location_m", "target_m", "color_linear_rgb", "power_w", "size_m"], [], errors):
+                continue
+            light_id = light.get("id")
+            if _string(light_id, f"{label}.id", errors, SLUG):
+                if light_id in declared_ids:
+                    errors.append(f"{label}.id has duplicate id {light_id}")
+                declared_ids.add(light_id)
+            if light.get("type") != "AREA":
+                errors.append(f"{label}.type must equal AREA")
+            location = _scene_spec_vector(light.get("location_m"), f"{label}.location_m", 3, -20, 20, errors)
+            target = _scene_spec_vector(light.get("target_m"), f"{label}.target_m", 3, -20, 20, errors)
+            if location is not None and target is not None and location == target:
+                errors.append(f"{label} location and target must differ")
+            _scene_spec_vector(light.get("color_linear_rgb"), f"{label}.color_linear_rgb", 3, 0, 1, errors)
+            _scene_spec_number(light.get("power_w"), f"{label}.power_w", errors, 1, 2000)
+            _scene_spec_number(light.get("size_m"), f"{label}.size_m", errors, 0.1, 10)
+
+    return errors
+
+
+def _validate_blender_scene_spec_file(path, project_id, storyboard):
+    label = "blender-scene-spec"
+    try:
+        with Path(path).open("rb") as stream:
+            content = stream.read(MAX_BLENDER_SCENE_SPEC_BYTES + 1)
+    except OSError as exc:
+        return [f"{label} cannot be read: {exc}"]
+    if len(content) > MAX_BLENDER_SCENE_SPEC_BYTES:
+        return [f"{label} exceeds maximum size of {MAX_BLENDER_SCENE_SPEC_BYTES} bytes"]
+    try:
+        text = content.decode("utf-8", errors="strict")
+        spec = STORYBOARD_VALIDATOR.parse_json(text)
+    except UnicodeDecodeError:
+        return [f"{label} must contain valid UTF-8"]
+    except ValueError as exc:
+        return [f"{label} is not strict valid JSON: {exc}"]
+    return _validate_blender_scene_spec(spec, project_id, storyboard)
 
 
 def _path(root, value, label, errors, warnings=None, required_file=False):
@@ -607,7 +825,8 @@ def validate_config(data, config_path, captured_resources=None):
         if len(scene_specs) != 1 or scene_specs[0][1].get("required") is not True:
             errors.append("productive scene profile requires exactly one required blender-scene-spec resource")
         else:
-            scene_spec_input = f"resource-{scene_specs[0][0]}"
+            scene_spec_id = scene_specs[0][0]
+            scene_spec_input = f"resource-{scene_spec_id}"
             expected_scene_inputs = {"storyboard", "validated-plan", scene_spec_input}
             scene_inputs = scene_stage.get("inputs")
             if (
@@ -617,6 +836,10 @@ def validate_config(data, config_path, captured_resources=None):
                 or len(scene_inputs) != len(expected_scene_inputs)
             ):
                 errors.append("productive 02-blender-scenes.inputs must contain storyboard, validated-plan, and the declared scene spec only")
+            scene_spec_path = project_resource_paths.get(scene_spec_id)
+            scene_project_id = project.get("id") if isinstance(project, dict) else None
+            if scene_spec_path is not None and isinstance(scene_project_id, str):
+                errors.extend(_validate_blender_scene_spec_file(scene_spec_path, scene_project_id, storyboard))
 
         if validation_stage.get("adapter") != "builtin-validation" or validation_stage.get("adapter_status") != "implemented":
             errors.append("productive scene profile requires implemented builtin-validation on Stage 01")
@@ -1543,14 +1766,17 @@ def _intends_productive_scenes_config(config):
     ) if isinstance(resources, list) else has_scene_timeline
     if stage02.get("adapter_status") == "implemented" and has_scene_timeline:
         return True
+    inputs = stage02.get("inputs", [])
+    has_scene_spec_input = isinstance(inputs, list) and "resource-scene-spec" in inputs
     if isinstance(resources, list) and any(
-        isinstance(resource, dict)
-        and (resource.get("kind") == "blender-scene-spec" or resource.get("id") == "scene-spec")
+        isinstance(resource, dict) and (
+            resource.get("kind") == "blender-scene-spec"
+            or (resource.get("id") == "scene-spec" and has_scene_spec_input)
+        )
         for resource in resources
     ):
         return True
     outputs = stage02.get("outputs", [])
-    has_scene_spec_input = isinstance(stage02.get("inputs"), list) and "resource-scene-spec" in stage02["inputs"]
     has_scene_package = isinstance(outputs, list) and any(
         isinstance(output, dict) and output.get("id") == "scene-package"
         and isinstance(output.get("path"), str)

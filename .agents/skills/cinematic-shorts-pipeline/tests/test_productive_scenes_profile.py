@@ -15,6 +15,41 @@ from test_pipeline import ROOT, load_pipeline, make_config
 pipeline = load_pipeline()
 
 
+def make_valid_scene_spec(project_id="test-project", scene_id="shot-01"):
+    return {
+        "scene_spec_version": 1,
+        "project_id": project_id,
+        "scene_id": scene_id,
+        "render": {
+            "width": 540, "height": 960, "fps": 12, "start_frame": 0,
+            "end_frame_exclusive": 24, "engine": "CYCLES", "device": "CPU",
+            "samples": 8, "threads": 2, "seed": 17, "denoising": False,
+            "image_format": "PNG_RGB8_SRGB",
+        },
+        "materials": [{
+            "id": "bronze", "base_color_linear_rgba": [0.6, 0.25, 0.08, 1.0],
+            "metallic": 0.35, "roughness": 0.4,
+        }],
+        "objects": [{
+            "id": "orb", "primitive": "uv_sphere", "material_id": "bronze",
+            "location_m": [0.0, 0.0, 0.0], "rotation_rad": [0.0, 0.0, 0.0],
+            "scale": [1.0, 1.0, 1.0],
+        }],
+        "camera": {
+            "lens_mm": 35, "interpolation": "LINEAR",
+            "keyframes": [
+                {"frame": 0, "location_m": [0.0, -5.0, 2.0], "target_m": [0.0, 0.0, 0.0]},
+                {"frame": 23, "location_m": [0.1, -4.8, 2.0], "target_m": [0.0, 0.0, 0.0]},
+            ],
+        },
+        "lights": [{
+            "id": "key", "type": "AREA", "location_m": [2.0, -3.0, 4.0],
+            "target_m": [0.0, 0.0, 0.0], "color_linear_rgb": [1.0, 0.82, 0.64],
+            "power_w": 350, "size_m": 2.0,
+        }],
+    }
+
+
 def make_scene_storyboard():
     storyboard = json.loads((ROOT / "templates" / "storyboard.json").read_text(encoding="utf-8"))
     storyboard["fps"] = 12
@@ -38,7 +73,9 @@ def make_scenes_config(root):
         "required": True,
         "kind": "blender-scene-spec",
     }]
-    (Path(root) / "scene-spec.json").write_text('{"scene_spec_version":1}\n', encoding="utf-8")
+    (Path(root) / "scene-spec.json").write_text(
+        json.dumps(make_valid_scene_spec(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
     validation = next(stage for stage in config["stages"] if stage["id"] == "01-validate-project")
     validation["inputs"] = ["pipeline-config", "storyboard", "resource-scene-spec"]
     scenes = next(stage for stage in config["stages"] if stage["id"] == "02-blender-scenes")
@@ -141,8 +178,12 @@ class ProductiveScenesProfileTests(unittest.TestCase):
     def test_legacy_declarative_blender_config_is_not_misclassified(self):
         shutil.copyfile(ROOT / "templates" / "storyboard.json", self.root / "storyboard.json")
         legacy = make_config(self.root)
-        legacy["project"]["resources"] = [{"id": "geometry", "path": "geometry.json", "required": True, "kind": "generic-json"}]
+        legacy["project"]["resources"] = [
+            {"id": "geometry", "path": "geometry.json", "required": True, "kind": "generic-json"},
+            {"id": "scene-spec", "path": "scene-spec.json", "required": True, "kind": "application-json"},
+        ]
         (self.root / "geometry.json").write_text("{}\n", encoding="utf-8")
+        (self.root / "scene-spec.json").write_text("{}\n", encoding="utf-8")
         next(stage for stage in legacy["stages"] if stage["id"] == "02-blender-scenes")["inputs"].append("resource-geometry")
         legacy_path = self.root / "legacy-pipeline.json"
         legacy_path.write_text(json.dumps(legacy), encoding="utf-8")
@@ -238,11 +279,13 @@ class ProductiveScenesProfileTests(unittest.TestCase):
         changed_storyboard["title"] = "Changed valid title"
         for relative_path, replacement in (
             ("storyboard.json", json.dumps(changed_storyboard)),
-            ("scene-spec.json", '{"scene_spec_version":1,"changed":true}'),
+            ("scene-spec.json", json.dumps({**make_valid_scene_spec(), "materials": [dict(make_valid_scene_spec()["materials"][0], roughness=0.45)]})),
         ):
             with self.subTest(path=relative_path):
                 (self.root / "storyboard.json").write_text(json.dumps(make_scene_storyboard(), indent=2), encoding="utf-8")
-                (self.root / "scene-spec.json").write_text('{"scene_spec_version":1}\n', encoding="utf-8")
+                (self.root / "scene-spec.json").write_text(
+                    json.dumps(make_valid_scene_spec(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+                )
                 manifest, _ = self._completed_stage_01_manifest()
                 (self.root / relative_path).write_text(replacement, encoding="utf-8")
                 manifest_path = self.root / "manifest.json"
