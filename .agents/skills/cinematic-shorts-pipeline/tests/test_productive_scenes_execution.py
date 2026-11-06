@@ -191,7 +191,7 @@ class ProductiveScenesExecutionTests(unittest.TestCase):
     def test_rejects_output_symlink_before_blender_probe(self):
         archive = self.root / ".pipeline/work/scenes.zip"
         archive.parent.mkdir(parents=True)
-        target = self.root / "target.zip"
+        target = archive.parent / "target.zip"
         target.write_bytes(b"safe")
         try:
             archive.symlink_to(target)
