@@ -1,10 +1,10 @@
 # Phase 5A — Blender Productive Adapter Architecture
 
-**Status:** propuesta documental para revisión; no implementada ni aprobada para producción.
+**Estado del documento:** diseño histórico de Phase 5A, aprobado en PR #15. El adaptador Stage 02 se integró después en PR #22 y Phase 5B.6 obtuvo PASS técnico en el cuarto gate real; estado vigente y límites en [roadmap.md](roadmap.md). Las secciones siguientes conservan el diagnóstico y las decisiones del momento del diseño.
 **Paquete objetivo:** `cinematic-shorts-pipeline` v0.10.
 **Compatibilidad exigida:** `pipeline_version: 1`, `manifest_version: 1`, fingerprints y ejecución productiva Kokoro de Phase 4B sin cambios.
 
-## 1. Diagnóstico de la arquitectura actual
+## 1. Diagnóstico de la arquitectura al diseñar Phase 5A
 
 La auditoría se realizó sobre `scripts/pipeline.py`, `scripts/tts-kokoro-worker.py`, `templates/pipeline.json`, las referencias de orquestación, seguridad, animación 3D, cinematografía y Remotion, el roadmap y las suites de pipeline, TTS productivo/publicación y manifiestos.
 

@@ -132,13 +132,13 @@ El plan original proponía integrar el piloto Kokoro al DAG con persistencia/hue
 
 ### Trabajo todavía pendiente
 
-El runner productivo actual solo cubre Stage 01/03 Kokoro. No existe ejecución Blender para escenas, Remotion para composición, FFmpeg para finalizar video, QA audiovisual, alineador de subtítulos, descargador/verificador de licencias, retries, resume ni orquestación audiovisual general. La rúbrica y benchmarks siguen siendo protocolos, no resultados medidos. La generación completa de cortos verticales no está implementada.
+Los runners productivos independientes cubren Stage 01/03 Kokoro y Stage 01/02 Blender. No existe un perfil que los ejecute juntos, ni composición Remotion, finalización FFmpeg, QA audiovisual, alineador de subtítulos, descargador/verificador de licencias, retries, resume u orquestación audiovisual general. La rúbrica y benchmarks siguen siendo protocolos, no resultados medidos. La generación completa de cortos verticales no está implementada.
 
 ## v0.10 — Phase 5A: Blender Productive Adapter Architecture (completada)
 
 - El diseño documental aprobado define cómo integrar productivamente Blender en Stage 02, preservando Phase 4B, `pipeline_version: 1`, `manifest_version: 1` y sus fingerprints.
 - Define un ejecutor Stage 02 en el orquestador compartido y un worker Blender fijo, con paquete ZIP único que contiene escenas `.blend`, secuencias PNG verificables, índice y provenance.
-- El diseño se fusionó mediante PR #15. Stage 02 continúa `pending`; no existe adaptador Blender productivo. No se ejecutó Blender, render ni generación audiovisual durante Phase 5A.
+- El diseño se fusionó mediante PR #15. Al cierre de Phase 5A, Stage 02 seguía `pending` y aún no existía adaptador Blender productivo; durante esa fase no se ejecutó Blender ni se generaron medios.
 - Diseño actualizado para Phase 5B: Cycles CPU, perfil MVP coherente 540×960/12 FPS/[0,24), 24 PNG, `run-productive-scenes CONFIG --blender ABSOLUTE_PATH`, validación ZIP read-only en streaming y scene spec JSON v1 estricto.
 - Criterio de validación de PNG para Phase 5B: decodificar completamente IDAT/scanlines con límites; rechazar corrupción, truncamiento y errores reales de decodificación aunque las cabeceras sean válidas.
 - El diseño incluye contrato de recursos, seguridad/headless, límites, compatibilidad TTS, manifiesto v1, pruebas mock multiplataforma y gates para Phase 5B/5C.
@@ -175,7 +175,7 @@ El runner productivo actual solo cubre Stage 01/03 Kokoro. No existe ejecución 
 - Phase 5B.4 se integró en `main` mediante merge commit `e9c81aac72b6834026df932c622c3f667b314d52`.
 - Se añade un decodificador PNG read-only, de biblioteca estándar, para RGB8 no entrelazado a 540×960 y límite de 32 MiB por archivo.
 - Verifica estructura y CRC de chunks, zlib completo/checksum, 960 scanlines exactas y filtros 0–4 mediante reconstrucción incremental con dos filas de trabajo; no conserva el raster completo.
-- Acepta chunks auxiliares explícitos `cHRM`, `eXIf`, `gAMA`, `oFFs`, `pHYs`, `sRGB`, `tEXt` y `tIME`; `eXIf` tiene límite propio de 4 KiB y validación TIFF/IFD acotada, mientras `oFFs` exige 9 bytes, unit 0/1 y precedencia a IDAT. Los demás mantienen sus límites y validaciones; se rechazan chunks auxiliares desconocidos.
+- La allowlist original acepta `cHRM`, `gAMA`, `pHYs`, `sRGB`, `tEXt` y `tIME`. PR #25 añadió `eXIf` con límite de 4 KiB y validación TIFF/IFD acotada, y `oFFs` de 9 bytes con unit 0/1 y precedencia a IDAT. Se siguen rechazando chunks auxiliares desconocidos.
 - Se mantiene independiente del worker, ZIP y publicación. Stage 02 sigue pending y no se habilita `run-productive-scenes`; no se ejecutan Blender ni renders.
 - Validación final de Phase 5B.4 después de auditoría en Windows/Python 3.12: 251 pruebas; 247 aprobadas y 4 omitidas por permisos de symlink. CI del commit aprobado pasó en los tres sistemas. `validate-skill.py` y `git diff --check` pasan. No se ejecutó Blender.
 
@@ -190,11 +190,25 @@ El runner productivo actual solo cubre Stage 01/03 Kokoro. No existe ejecución 
 - La API acepta un `ScenePackageContext` externo para comparar IDs, run, fingerprints, hashes de inputs, identidad observada del runtime, seed autorizada del Scene Spec validado y SHA-256 del ZIP declarado por el manifiesto. Sin ese contexto, el resultado acredita únicamente integridad y consistencia interna.
 - Las pruebas usan ZIP/PNG sintéticos y cubren corrupción de miembros/CRC, metadata inconsistente, rutas, duplicados, esquemas JSON, contradicciones semánticas, límites y contexto. No ejecutan Blender ni producen medios.
 - Esta fase no crea ZIP productivo, no publica, no integra el validador con `validate-manifest`, no habilita `run-productive-scenes` y no completa Stage 02.
-- El constructor/publicación exclusiva de Phase 5B.5B se implementa en una rama separada para auditoría independiente. El gate local Blender 5.2.3 de Phase 5B.6 sigue pendiente.
+- En ese corte, el constructor/publicación exclusiva de Phase 5B.5B y el gate local Blender 5.2.3 de Phase 5B.6 seguían pendientes.
 
-## v0.10 — Phase 5B.5B: ZIP Builder, Exclusive Publication & Stage 02 Integration (en auditoría)
+## v0.10 — Phase 5B.5B: ZIP Builder, Exclusive Publication & Stage 02 Integration (completada)
 
+- Integrada mediante PR #22, merge commit `303f1d7c19b931b8c4a460b4e7d772c5c5c8fcdc`.
 - El perfil productivo permite Stage 02 `implemented` solo con Scene Spec v1, DAG/outputs exactos y Blender declarado `implemented/verified`; conserva el perfil heredado `pending` y Kokoro Phase 4B.
 - El padre reutiliza Stage 01 y el worker fijo, construye ZIP classic de 27 miembros desde staging sin cargar los medios completos en memoria, valida con contexto externo, publica exclusivamente, relee el ZIP y persiste Stage 02 `completed` solo tras verificación.
 - `validate-manifest` comprueba el paquete de escenas en streaming y sin escrituras, extracción ni procesos. Stage 03/04/05/06 permanecen `pending`; no hay retry/resume ni adopción de huérfanos.
-- La suite sintética no acredita ejecución real de Blender ni openability del `.blend`. Phase 5B.6 reserva el gate local opt-in con Blender 5.2.3.
+- La suite sintética no acredita ejecución real de Blender ni apertura del `.blend`; el gate real se documenta en Phase 5B.6.
+
+## v0.10 — Phase 5B.6: gate local real Blender 5.2.3 (PASS técnico)
+
+- Gate 1: Stage 02 falló por import del módulo hermano `scene_package_builder`; corregido en PR #23 (merge commit `63c9b23f415c580d75cbca6b09e5a1d14a515636`).
+- Gate 2: el `.blend` comprimido con Zstandard no cumplía la cabecera exigida; guardado sin compresión y verificación temprana corregidos en PR #24 (merge commit `cffcb560a835c22ab04454e1787daf5a1e1a114d`).
+- Gate 3: el decoder rechazó los chunks PNG legítimos `eXIf` y `oFFs`; allowlist acotada y validación estricta corregidas en PR #25 (merge commit `245195fbcd69ca1698d54e7cc8ea807c9eb0c0db`). Los tres gates fallidos conservan sus artefactos originales; ninguno acreditó Stage 02 `completed`.
+- Cuarto gate: una ejecución real de Blender 5.2.3, Cycles CPU, 540×960, 12 FPS, frames `[0,24)`; sin reintentos, exit code 0. Stage 01/02 `completed`; Stage 03/04/05/06 `pending` en ese manifiesto. ZIP publicado exclusivamente con 27 miembros y SHA-256 `f81c2c700ea133a20d916502d0792665637c6a6f6c47da05e6d6dee26fb04c88`; `validate-manifest` PASS y read-only. Informe local fuera del repositorio: `C:\VideosIA\phase-5b6-audit\phase-5b6-fourth-20261106-3f390d90f02c497d8e3816cfc74c0e56\gate-report.md`.
+- El `.blend` no se abrió nuevamente en Blender. Solo se inspeccionaron los frames 0, 8, 16 y 23; falta revisión de la secuencia completa y aprobación artística humana. El resultado local no garantiza funcionamiento en otros equipos ni generación completa de video. Kokoro Phase 4B permanece productiva en su perfil independiente; Remotion, FFmpeg y QA siguen pendientes.
+
+## v0.10 — Phase 5B.7: Documentation & Release Readiness
+
+- Actualizar el estado oficial de Phase 5B.5B/5B.6 y distinguir evidencia técnica, apertura del archivo y aprobación artística.
+- Mantener `pipeline_version: 1`, `manifest_version: 1`, Scene Spec v1, fingerprints y manifiestos históricos sin cambios; Phase 5C se planificará por separado.
