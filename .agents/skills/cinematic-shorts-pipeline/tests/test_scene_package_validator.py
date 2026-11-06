@@ -157,6 +157,7 @@ def expected_context(archive_bytes):
         stage_02_fingerprint=STAGE_02_FINGERPRINT,
         input_hashes=dict(INPUT_HASHES),
         runtime=dict(_provenance()["runtime"]),
+        expected_render_seed=31415,
         manifest_scene_package_sha256=_sha(archive_bytes),
     )
 
@@ -229,6 +230,30 @@ class ScenePackageValidatorTests(unittest.TestCase):
         self.assertEqual(0, stream.tell())
         self.assertFalse(stream.closed)
         self.assertEqual(archive, stream.getvalue())
+
+    def test_context_binds_scene_package_seed_to_validated_scene_spec(self):
+        matching_archive = make_archive()
+        matching_result = validator.validate_scene_package(
+            io.BytesIO(matching_archive), expected_context=expected_context(matching_archive),
+        )
+        self.assertTrue(matching_result.context_verified)
+
+        changed_archive = make_archive(provenance_change=lambda provenance: provenance["render"].update(seed=123456))
+        with self.assertRaisesRegex(validator.ScenePackageValidationError, "seed|Scene Spec|context"):
+            validator.validate_scene_package(
+                io.BytesIO(changed_archive), expected_context=expected_context(changed_archive),
+            )
+
+    def test_context_rejects_invalid_expected_scene_spec_seeds(self):
+        archive = make_archive()
+        base_context = expected_context(archive)
+        for invalid_seed in (True, 31415.0, "31415", -1, 2147483648):
+            with self.subTest(seed=invalid_seed):
+                context = validator.ScenePackageContext(
+                    **{**base_context.__dict__, "expected_render_seed": invalid_seed},
+                )
+                with self.assertRaisesRegex(validator.ScenePackageValidationError, "expected_render_seed|seed"):
+                    validator.validate_scene_package(io.BytesIO(archive), expected_context=context)
 
     def test_rejects_missing_and_additional_members(self):
         archive = make_archive()

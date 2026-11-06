@@ -69,6 +69,7 @@ class ScenePackageContext:
     stage_02_fingerprint: str
     input_hashes: dict
     runtime: dict
+    expected_render_seed: int
     manifest_scene_package_sha256: str
 
 
@@ -589,6 +590,11 @@ def _validate_context(context, package_values, provenance_values, archive_sha256
         _fail("scene package input hashes do not match expected project/storyboard/validated-plan context")
     if inputs["validated_plan_sha256"] != expected_inputs.get("validated-plan"):
         _fail("scene package validated-plan hash does not match expected context")
+    expected_seed = _require_int(
+        context.expected_render_seed, "context expected_render_seed", 0, 2147483647,
+    )
+    if provenance_values[5]["seed"] != expected_seed:
+        _fail("scene package provenance render.seed does not match the validated Scene Spec context")
     if not isinstance(context.runtime, dict):
         _fail("context runtime must contain independently observed tool identity")
     runtime = provenance_values[3]
