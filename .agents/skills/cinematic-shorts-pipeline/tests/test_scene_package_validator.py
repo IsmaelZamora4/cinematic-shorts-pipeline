@@ -37,7 +37,7 @@ def _sha(data):
 
 
 def _default_payloads(png):
-    payloads = {f"scenes/{SCENE_ID}/scene.blend": b"BLENDER_v502" + bytes(128)}
+    payloads = {f"scenes/{SCENE_ID}/scene.blend": b"BLENDER17-01v0502" + bytes(128)}
     payloads.update({f"scenes/{SCENE_ID}/frames/frame-{frame:06d}.png": png for frame in range(24)})
     return payloads
 
@@ -417,6 +417,31 @@ class ScenePackageValidatorTests(unittest.TestCase):
         archive = make_archive(payload_change=lambda payloads: payloads.__setitem__(
             f"scenes/{SCENE_ID}/scene.blend", b"not-a-blend" + bytes(128)))
         self.assert_rejected(archive, pattern="blend|header|Blender")
+
+    def test_accepts_uncompressed_blender_52_17_byte_header(self):
+        archive = make_archive(payload_change=lambda payloads: payloads.__setitem__(
+            f"scenes/{SCENE_ID}/scene.blend", b"BLENDER17-01v0502" + bytes(128)))
+        result = validator.validate_scene_package(
+            io.BytesIO(archive), expected_context=expected_context(archive),
+        )
+        self.assertTrue(result.context_verified)
+
+    def test_rejects_legacy_compressed_truncated_and_altered_blend_headers(self):
+        headers = (
+            b"BLENDER_v502",                         # former synthetic 12-byte fixture
+            b"BLENDER17-01v050",                    # truncated 17-byte header
+            bytes.fromhex("28b52ffda0410601000d3700aa47981149"),  # Zstandard frame
+            b"BLENDER18-01v0502",                  # format marker
+            b"BLENDER17-00v0502",                  # architecture marker
+            b"BLENDER17-01V0502",                  # version marker
+            b"BLENDER17-01v0503",                  # different Blender version
+        )
+        for header in headers:
+            with self.subTest(header=header):
+                payload = header if len(header) < 17 else header + bytes(128)
+                archive = make_archive(payload_change=lambda payloads: payloads.__setitem__(
+                    f"scenes/{SCENE_ID}/scene.blend", payload))
+                self.assert_rejected(archive, pattern="blend|header|Blender")
 
     def test_enforces_limits_with_injected_small_budgets(self):
         archive = make_archive()

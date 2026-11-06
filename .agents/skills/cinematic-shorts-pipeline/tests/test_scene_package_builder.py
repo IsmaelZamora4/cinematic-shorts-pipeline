@@ -20,7 +20,7 @@ class ScenePackageBuilderTests(unittest.TestCase):
             frame_data, _ = make_png()
             blend = root / "scenes" / scene_id / "scene.blend"
             blend.parent.mkdir(parents=True)
-            blend.write_bytes(b"BLENDER_v502" + bytes(128))
+            blend.write_bytes(b"BLENDER17-01v0502" + bytes(128))
             frames = blend.parent / "frames"
             frames.mkdir()
             for frame in range(24):
@@ -64,7 +64,7 @@ class ScenePackageBuilderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / "source"
-            source.write_bytes(b"BLENDER_v502" + bytes(128))
+            source.write_bytes(b"BLENDER17-01v0502" + bytes(128))
             blend = root / "scenes" / "shot-01" / "scene.blend"
             blend.parent.mkdir(parents=True)
             try:

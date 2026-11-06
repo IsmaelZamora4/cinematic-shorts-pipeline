@@ -179,6 +179,47 @@ class BlenderWorkerRuntimeTests(unittest.TestCase):
         self.assertEqual(0, calls)
         self.assertRegex(str(error), "prerelease or development")
 
+    def test_main_saves_uncompressed_blend_and_rejects_bad_header_before_render(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            request_path = root / "request.json"
+            request_path.write_text(json.dumps({
+                "request_version": 1, "project_id": "test-project",
+                "scene_spec": make_valid_scene_spec(), "expected_blender_version": [5, 2, 3],
+                "expected_blender_version_string": "5.2.3", "staging_root": str(root),
+            }), encoding="utf-8")
+            output_dir = root / "scenes" / "shot-01"
+            frames_dir = output_dir / "frames"
+            frames_dir.mkdir(parents=True)
+            blend_path = output_dir / "scene.blend"
+
+            def save_compressed_blend(*, filepath, **_kwargs):
+                Path(filepath).write_bytes(bytes.fromhex("28b52ffd") + bytes(128))
+
+            save = mock.Mock(side_effect=save_compressed_blend)
+            render = mock.Mock(side_effect=AssertionError("render must not start"))
+            bpy = types.SimpleNamespace(
+                app=types.SimpleNamespace(version=(5, 2, 3), version_cycle="release",
+                                          build_options=types.SimpleNamespace(cycles=True)),
+                ops=types.SimpleNamespace(wm=types.SimpleNamespace(save_as_mainfile=save),
+                                          render=types.SimpleNamespace(render=render)),
+            )
+            scene = types.SimpleNamespace(cycles=types.SimpleNamespace(seed=0),
+                                          render=types.SimpleNamespace(filepath=""), frame_set=mock.Mock())
+            camera = types.SimpleNamespace()
+            samples = [{"frame": 0, "location_m": [0.0, -5.0, 2.0], "direction": [0.0, 1.0, 0.0]}]
+            vector = lambda _direction: types.SimpleNamespace(to_track_quat=lambda *_args: object())
+            with (
+                mock.patch.dict(sys.modules, {"bpy": bpy, "mathutils": types.SimpleNamespace(Vector=vector)}),
+                mock.patch.object(worker, "_configure_scene", return_value=(
+                    scene, camera, output_dir, frames_dir, samples, 4.0,
+                )),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "uncompressed.*header"):
+                    worker.main(["--request", str(request_path)])
+            save.assert_called_once_with(filepath=str(blend_path), check_existing=False, compress=False)
+            render.assert_not_called()
+
     def test_blender_52_channelbags_set_camera_and_seed_interpolation(self):
         slot = object()
         def curve(path, index):

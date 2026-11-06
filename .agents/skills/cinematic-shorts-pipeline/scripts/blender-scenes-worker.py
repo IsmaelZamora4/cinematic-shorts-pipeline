@@ -21,6 +21,7 @@ FLOAT_REL_TOL = 1e-6
 FLOAT_ABS_TOL = 1e-7
 MAX_SCENE_BLEND_BYTES = 512 * 1024 * 1024
 MAX_FRAME_PNG_BYTES = 32 * 1024 * 1024
+UNCOMPRESSED_BLEND_52_HEADER = b"BLENDER17-01v0502"
 EXPECTED_SPEC_FIELDS = {
     "scene_spec_version", "project_id", "scene_id", "render", "materials", "objects", "camera", "lights",
 }
@@ -601,11 +602,14 @@ def main(argv=None):
         blend_path = output_dir / "scene.blend"
         if blend_path.exists():
             raise RuntimeError("worker refuses to overwrite scene.blend")
-        bpy.ops.wm.save_as_mainfile(filepath=str(blend_path), check_existing=False)
+        bpy.ops.wm.save_as_mainfile(filepath=str(blend_path), check_existing=False, compress=False)
         if not blend_path.is_file() or blend_path.stat().st_size <= 0:
             raise RuntimeError("Blender did not produce a non-empty scene.blend")
         if blend_path.stat().st_size > MAX_SCENE_BLEND_BYTES:
             raise RuntimeError("scene.blend exceeds its supported staging size")
+        with blend_path.open("rb") as saved_blend:
+            if saved_blend.read(len(UNCOMPRESSED_BLEND_52_HEADER)) != UNCOMPRESSED_BLEND_52_HEADER:
+                raise RuntimeError("Blender did not save scene.blend with the required uncompressed 5.2 header")
 
         render_start = time.perf_counter()
         for sample in samples:
