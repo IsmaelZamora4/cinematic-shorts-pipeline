@@ -22,6 +22,38 @@ def chunk(kind, data):
     return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
 
 
+def make_exif_payload(byte_order="big", *, ifd_offset=24, next_ifd_offset=0):
+    endian = ">" if byte_order == "big" else "<"
+    marker = b"MM" if byte_order == "big" else b"II"
+    data = bytearray(ifd_offset)
+    data[:2] = marker
+    data[2:4] = struct.pack(endian + "H", 42)
+    data[4:8] = struct.pack(endian + "I", ifd_offset)
+    if ifd_offset >= 24:
+        struct.pack_into(endian + "II", data, 8, 72, 1)
+        struct.pack_into(endian + "II", data, 16, 72, 1)
+        data.extend(struct.pack(endian + "H", 2))
+        data.extend(struct.pack(endian + "HHI4s", 0x011A, 5, 1, struct.pack(endian + "I", 8)))
+        data.extend(struct.pack(endian + "HHI4s", 0x011B, 5, 1, struct.pack(endian + "I", 16)))
+    else:
+        data.extend(struct.pack(endian + "H", 0))
+    data.extend(struct.pack(endian + "I", next_ifd_offset))
+    return bytes(data)
+
+
+def make_blender_style_png():
+    ancillary = [
+        chunk(b"sRGB", b"\x03"),
+        chunk(b"gAMA", struct.pack(">I", 45455)),
+        chunk(b"cHRM", struct.pack(">8I", 31270, 32900, 64000, 33000, 30000, 60000, 15000, 6000)),
+        chunk(b"eXIf", make_exif_payload("big", ifd_offset=24)),
+        chunk(b"oFFs", struct.pack(">iiB", 0, 0, 0)),
+        chunk(b"pHYs", struct.pack(">IIB", 2834, 2834, 1)),
+        chunk(b"tEXt", b"Software\x00Blender"),
+    ]
+    return make_png(extra_chunks=ancillary, split_idat=8192)[0]
+
+
 def _filter_row(raw, previous, filter_type):
     result = bytearray(len(raw))
     for i, value in enumerate(raw):
@@ -106,6 +138,73 @@ class PngRgb8DecoderTests(unittest.TestCase):
         ]
         png, _ = make_png(extra_chunks=ancillary)
         decoder.verify_png_rgb8(BoundedStream(png))
+
+    def test_accepts_blender_style_exif_and_offset_chunks(self):
+        png = make_blender_style_png()
+        result = decoder.verify_png_rgb8(BoundedStream(png))
+        self.assertEqual((WIDTH, HEIGHT), (result["width"], result["height"]))
+
+    def test_accepts_exif_little_and_big_endian_with_nondefault_ifd_offset(self):
+        for byte_order in ("little", "big"):
+            with self.subTest(byte_order=byte_order):
+                png, _ = make_png(extra_chunks=[chunk(b"eXIf", make_exif_payload(byte_order, ifd_offset=24))])
+                decoder.verify_png_rgb8(BoundedStream(png))
+
+    def test_accepts_exif_ifd_at_minimum_valid_offset(self):
+        png, _ = make_png(extra_chunks=[chunk(b"eXIf", make_exif_payload("little", ifd_offset=8))])
+        decoder.verify_png_rgb8(BoundedStream(png))
+
+    def test_accepts_signed_offset_positions_and_micrometer_unit(self):
+        offsets = chunk(b"oFFs", struct.pack(">iiB", -123, 456, 1))
+        decoder.verify_png_rgb8(BoundedStream(make_png(extra_chunks=[offsets])[0]))
+
+    def test_rejects_malformed_exif_headers_and_ifd_references(self):
+        valid = make_exif_payload("big", ifd_offset=24)
+        invalid_offsets = []
+        for offset in (0, 7, len(valid) - 1, 0xFFFFFFFF):
+            malformed = bytearray(valid)
+            malformed[4:8] = struct.pack(">I", offset)
+            invalid_offsets.append(bytes(malformed))
+        invalid_offsets.append(make_exif_payload("big", ifd_offset=24, next_ifd_offset=0xFFFFFFFF))
+        invalid_value_reference = bytearray(valid)
+        struct.pack_into(">I", invalid_value_reference, 34, 0xFFFFFFFF)
+        invalid_offsets.append(bytes(invalid_value_reference))
+        invalid_payloads = (
+            b"",
+            b"MM\x00",
+            b"ZZ\x00*\x00\x00\x00\x08",
+            b"MM\x00+\x00\x00\x00\x08\x00\x00\x00\x00\x00\x00",
+            b"MM\x00*\x00\x00\x00\x08\x00\x01",
+            *invalid_offsets,
+        )
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload[:12]):
+                self.assert_rejected(make_png(extra_chunks=[chunk(b"eXIf", payload)])[0])
+
+    def test_rejects_exif_over_limit_and_duplicate(self):
+        self.assert_rejected(make_png(extra_chunks=[chunk(b"eXIf", bytes(4097))])[0])
+        exif = chunk(b"eXIf", make_exif_payload())
+        self.assert_rejected(make_png(extra_chunks=[exif, exif])[0])
+
+    def test_rejects_exif_crc_corruption(self):
+        png = bytearray(make_blender_style_png())
+        offset = png.index(b"eXIf")
+        length = struct.unpack(">I", png[offset - 4:offset])[0]
+        crc_offset = offset + 4 + length
+        png[crc_offset] ^= 1
+        self.assert_rejected(bytes(png))
+
+    def test_rejects_invalid_offset_chunks(self):
+        for payload in (b"\x00" * 8, struct.pack(">iiB", 0, 0, 2), struct.pack(">iiB", 0, 0, 0) + b"x"):
+            with self.subTest(payload=payload):
+                self.assert_rejected(make_png(extra_chunks=[chunk(b"oFFs", payload)])[0])
+        offset = chunk(b"oFFs", struct.pack(">iiB", 0, 0, 0))
+        self.assert_rejected(make_png(extra_chunks=[offset, offset])[0])
+
+    def test_rejects_offset_chunk_after_idat(self):
+        png, _ = make_png()
+        offset = chunk(b"oFFs", struct.pack(">iiB", 0, 0, 0))
+        self.assert_rejected(png[:-12] + offset + png[-12:])
 
     def test_accepts_text_chunk_with_empty_text_and_valid_crc(self):
         png, _ = make_png(extra_chunks=[chunk(b"tEXt", b"Comment\x00")])

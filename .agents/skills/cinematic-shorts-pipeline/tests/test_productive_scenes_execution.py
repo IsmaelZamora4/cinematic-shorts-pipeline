@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from test_pipeline import load_pipeline
-from test_png_rgb8_decoder import make_png
+from test_png_rgb8_decoder import make_blender_style_png, make_png
 from test_productive_scenes_profile import make_scenes_config
 
 
@@ -28,6 +28,7 @@ class ProductiveScenesExecutionTests(unittest.TestCase):
         self.blender_tool = next(tool for tool in self.config["tools"] if tool["id"] == "blender")
         self.blender_tool.update(adapter_status="implemented", availability="verified")
         self.config_path = self.root / "pipeline.json"
+        self.frame_png = VALID_PNG
         self.write_config()
         self.blender_path = self.root / ("blender.exe" if os.name == "nt" else "blender")
         self.blender_path.write_bytes(b"mock blender binary")
@@ -56,7 +57,7 @@ class ProductiveScenesExecutionTests(unittest.TestCase):
         outputs = [f"scenes/{scene_id}/scene.blend"]
         for frame in range(24):
             name = f"scenes/{scene_id}/frames/frame-{frame:06d}.png"
-            (root / name).write_bytes(VALID_PNG)
+            (root / name).write_bytes(self.frame_png)
             outputs.append(name)
         response = {
             "record_type": "blender-scenes-worker-result", "worker_version": 1,
@@ -109,6 +110,20 @@ class ProductiveScenesExecutionTests(unittest.TestCase):
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         errors, _ = pipeline.validate_manifest_file(self.config_path, manifest_path)
         self.assertTrue(any("scene-package" in error and "seed" in error for error in errors), errors)
+
+    def test_blender_style_pngs_complete_stage_02_through_productive_runner(self):
+        self.frame_png = make_blender_style_png()
+        result = self.run_scenes()
+        manifest_path = Path(result["manifest_path"])
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual("completed", manifest["stages"]["02-blender-scenes"]["status"])
+        artifact = manifest["stages"]["02-blender-scenes"]["artifacts"][0]
+        self.assertEqual("scene-package", artifact["id"])
+        self.assertEqual(hashlib.sha256((self.root / ".pipeline" / "work" / "scenes.zip").read_bytes()).hexdigest(), artifact["sha256"])
+        archive = self.root / ".pipeline" / "work" / "scenes.zip"
+        with zipfile.ZipFile(archive) as package:
+            self.assertEqual(27, len(package.infolist()))
+        self.assertEqual(([], []), pipeline.validate_manifest_file(self.config_path, manifest_path))
 
     def test_optional_resources_without_kind_and_missing_are_compatible(self):
         self.config["project"]["resources"] = [

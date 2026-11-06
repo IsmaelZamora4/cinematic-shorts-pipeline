@@ -19,10 +19,17 @@ MAX_PNG_BYTES = 32 * 1024 * 1024
 IO_CHUNK_BYTES = 64 * 1024
 MAX_WORKING_ROW_BYTES = 2 * ROW_DATA_BYTES
 MAX_TEXT_CHUNK_BYTES = 4096
+MAX_EXIF_CHUNK_BYTES = 4096
 
-_ALLOWED_AUXILIARY_CHUNKS = {b"cHRM", b"gAMA", b"pHYs", b"sRGB", b"tEXt", b"tIME"}
-_SINGLETON_CHUNKS = {b"cHRM", b"gAMA", b"pHYs", b"sRGB", b"tIME"}
+_ALLOWED_AUXILIARY_CHUNKS = {
+    b"cHRM", b"eXIf", b"gAMA", b"oFFs", b"pHYs", b"sRGB", b"tEXt", b"tIME",
+}
+_SINGLETON_CHUNKS = {b"cHRM", b"eXIf", b"gAMA", b"oFFs", b"pHYs", b"sRGB", b"tIME"}
 _SRGB_CHROMATICITIES = (31270, 32900, 64000, 33000, 30000, 60000, 15000, 6000)
+_TIFF_FIELD_TYPE_BYTES = {
+    1: 1,  2: 1,  3: 2,  4: 4,  5: 8,  6: 1,
+    7: 1,  8: 2,  9: 4, 10: 8, 11: 4, 12: 8,
+}
 
 
 class PngValidationError(ValueError):
@@ -168,11 +175,65 @@ def _valid_keyword(payload):
     return all(32 <= value <= 126 or 161 <= value <= 255 for value in keyword)
 
 
+def _validate_exif(data):
+    """Validate bounded TIFF headers, IFD tables, and directly referenced values."""
+    if len(data) < 8:
+        raise PngValidationError("PNG eXIf TIFF header is truncated")
+    if data[:2] == b"II":
+        endian = "<"
+    elif data[:2] == b"MM":
+        endian = ">"
+    else:
+        raise PngValidationError("PNG eXIf TIFF byte order is invalid")
+    if struct.unpack_from(endian + "H", data, 2)[0] != 42:
+        raise PngValidationError("PNG eXIf TIFF magic is invalid")
+
+    def validate_ifd(offset, inspect_value_references):
+        if offset < 8 or offset + 2 > len(data):
+            raise PngValidationError("PNG eXIf IFD offset is outside its payload")
+        entry_count = struct.unpack_from(endian + "H", data, offset)[0]
+        entries_start = offset + 2
+        entries_end = entries_start + entry_count * 12
+        if entries_end + 4 > len(data):
+            raise PngValidationError("PNG eXIf IFD table is truncated")
+
+        if inspect_value_references:
+            for index in range(entry_count):
+                entry_offset = entries_start + index * 12
+                field_type = struct.unpack_from(endian + "H", data, entry_offset + 2)[0]
+                value_count = struct.unpack_from(endian + "I", data, entry_offset + 4)[0]
+                field_bytes = _TIFF_FIELD_TYPE_BYTES.get(field_type)
+                if field_bytes is None:
+                    raise PngValidationError("PNG eXIf IFD contains an unsupported TIFF field type")
+                value_bytes = value_count * field_bytes
+                if value_bytes > 4:
+                    value_offset = struct.unpack_from(endian + "I", data, entry_offset + 8)[0]
+                    if value_offset < 8 or value_offset + value_bytes > len(data):
+                        raise PngValidationError("PNG eXIf value reference is outside its payload")
+
+        next_ifd_offset = struct.unpack_from(endian + "I", data, entries_end)[0]
+        return next_ifd_offset
+
+    first_ifd_offset = struct.unpack_from(endian + "I", data, 4)[0]
+    next_ifd_offset = validate_ifd(first_ifd_offset, True)
+    if next_ifd_offset:
+        # Validate one referenced table only; do not follow an arbitrary IFD chain.
+        validate_ifd(next_ifd_offset, False)
+
+
 def _validate_auxiliary(kind, data, seen):
     if kind not in _ALLOWED_AUXILIARY_CHUNKS:
         raise PngValidationError("PNG contains an unsupported ancillary chunk")
     if kind in _SINGLETON_CHUNKS and kind in seen:
         raise PngValidationError("PNG contains a duplicate singleton chunk")
+    if kind == b"eXIf":
+        _validate_exif(data)
+    if kind == b"oFFs":
+        if len(data) != 9:
+            raise PngValidationError("PNG oFFs chunk has an invalid length")
+        _, _, unit = struct.unpack(">iiB", data)
+        if unit not in (0, 1):
+            raise PngValidationError("PNG oFFs chunk has an invalid unit")
     if kind == b"cHRM":
         if len(data) != 32 or any(value > 100000 for value in struct.unpack(">8I", data)):
             raise PngValidationError("PNG cHRM chunk has invalid data")
@@ -199,7 +260,10 @@ def verify_png_rgb8(stream):
     """Validate one supported PNG from a binary stream without retaining its raster.
 
     Accepted output is fixed at 540x960, RGB, 8-bit, non-interlaced. Only the
-    explicit cHRM/gAMA/pHYs/sRGB/tEXt/tIME ancillary allowlist is accepted.
+    explicit cHRM/eXIf/gAMA/oFFs/pHYs/sRGB/tEXt/tIME ancillary allowlist is
+    accepted. eXIf is capped at 4 KiB and structurally checked without following
+    unbounded TIFF pointer chains; all other ancillary chunks retain the 32-byte
+    default limit, except tEXt which retains its existing 4 KiB limit.
     The function reads at most 64 KiB per call and retains two 1,620-byte rows,
     a bounded zlib output block, and bounded chunk metadata.
     """
@@ -274,9 +338,16 @@ def verify_png_rgb8(stream):
 
         if kind[0] & 0x20 == 0:
             raise PngValidationError("PNG contains an unknown critical chunk")
+        if kind == b"oFFs" and got_idat:
+            raise PngValidationError("PNG oFFs chunk must precede IDAT")
         if (got_idat or got_plte) and kind in {b"cHRM", b"gAMA", b"pHYs", b"sRGB"}:
             raise PngValidationError("PNG color/physical metadata must precede PLTE and IDAT")
-        allowed_max = MAX_TEXT_CHUNK_BYTES if kind == b"tEXt" else 32
+        if kind == b"eXIf":
+            allowed_max = MAX_EXIF_CHUNK_BYTES
+        elif kind == b"tEXt":
+            allowed_max = MAX_TEXT_CHUNK_BYTES
+        else:
+            allowed_max = 32
         if length > allowed_max:
             raise PngValidationError("PNG ancillary chunk exceeds its size limit")
         data = reader.read_chunk_data(length, crc, collect=True)
