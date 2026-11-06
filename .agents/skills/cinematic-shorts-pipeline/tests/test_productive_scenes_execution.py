@@ -110,6 +110,45 @@ class ProductiveScenesExecutionTests(unittest.TestCase):
         errors, _ = pipeline.validate_manifest_file(self.config_path, manifest_path)
         self.assertTrue(any("scene-package" in error and "seed" in error for error in errors), errors)
 
+    def test_optional_resources_without_kind_and_missing_are_compatible(self):
+        self.config["project"]["resources"] = [
+            {"id": "optional-data", "path": "optional.json", "required": False},
+            {"id": "optional-missing", "path": "missing.json", "required": False},
+            *self.config["project"]["resources"],
+        ]
+        (self.root / "optional.json").write_text("{}\n", encoding="utf-8")
+        self.write_config()
+        loaded, errors, warnings, _ = pipeline.load_and_validate_config(self.config_path)
+        self.assertEqual([], errors)
+        self.assertEqual(["optional resource is not present: missing.json"], warnings)
+        self.assertTrue(pipeline._is_productive_scenes_config(loaded))
+
+        with mock.patch.object(pipeline, "_run_blender_version_probe", side_effect=self.fake_probe) as probe, \
+             mock.patch.object(pipeline, "_run_blender_process", side_effect=self.fake_worker) as worker:
+            result = pipeline.run_productive_scenes(self.config_path, blender_path=self.blender_path)
+        self.assertEqual(1, probe.call_count)
+        self.assertEqual(1, worker.call_count)
+        manifest_path = Path(result["manifest_path"])
+        errors, warnings = pipeline.validate_manifest_file(self.config_path, manifest_path)
+        self.assertEqual([], errors)
+        self.assertEqual(["optional resource is not present: missing.json"], warnings)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual("completed", manifest["stages"]["02-blender-scenes"]["status"])
+
+    def test_scene_warning_policy_rejects_unexpected_and_stale_warnings(self):
+        config = self.config
+        expected = "optional resource is not present: missing.json"
+        config["project"]["resources"].append(
+            {"id": "optional-missing", "path": "missing.json", "required": False}
+        )
+        self.assertEqual([], pipeline._unexpected_scene_warnings(config, self.config_path, [expected]))
+        self.assertEqual(
+            ["pipeline config changed since this run"],
+            pipeline._unexpected_scene_warnings(config, self.config_path, [expected, "pipeline config changed since this run"]),
+        )
+        (self.root / "missing.json").write_text("{}\n", encoding="utf-8")
+        self.assertEqual([expected], pipeline._unexpected_scene_warnings(config, self.config_path, [expected]))
+
     def test_worker_failure_never_completes_stage_02(self):
         def fail_worker(command, cwd):
             raise ValueError("synthetic worker failure")

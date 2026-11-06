@@ -1852,7 +1852,7 @@ def _run_blender_scenes_worker(config_path, runtime):
     input_hashes, _ = _productive_snapshot(config, config_path)
     root = Path(config_path).resolve().parent
     resource = next(
-        item for item in config["project"]["resources"] if item["kind"] == "blender-scene-spec"
+        item for item in config["project"]["resources"] if item.get("kind") == "blender-scene-spec"
     )
     scene_spec_path = root.joinpath(*PurePosixPath(resource["path"]).parts)
     scene_spec_bytes = _read_bounded_regular_file(
@@ -3152,7 +3152,7 @@ def _print_plan(config, waves):
 
 def _validated_scene_spec_for_package(config, config_path):
     root = Path(config_path).resolve().parent
-    resource = next(item for item in config["project"]["resources"] if item["kind"] == "blender-scene-spec")
+    resource = next(item for item in config["project"]["resources"] if item.get("kind") == "blender-scene-spec")
     spec_path = root.joinpath(*PurePosixPath(resource["path"]).parts)
     spec_data = _read_bounded_regular_file(spec_path, MAX_BLENDER_SCENE_SPEC_BYTES, "blender-scene-spec")
     storyboard_path = root.joinpath(*PurePosixPath(config["project"]["storyboard"]).parts)
@@ -3163,6 +3163,22 @@ def _validated_scene_spec_for_package(config, config_path):
     if errors:
         raise ValueError("scene spec changed during execution: " + "; ".join(errors))
     return spec
+
+
+def _unexpected_scene_warnings(config, config_path, warnings):
+    """Allow only current warnings for declared optional resources that are absent."""
+    root = Path(config_path).resolve().parent
+    allowed = set()
+    for resource in config.get("project", {}).get("resources", []):
+        if not isinstance(resource, dict) or resource.get("required") is not False:
+            continue
+        relative = resource.get("path")
+        if not isinstance(relative, str):
+            continue
+        path = root.joinpath(*PurePosixPath(relative).parts)
+        if not path.is_file():
+            allowed.add(f"optional resource is not present: {relative}")
+    return [warning for warning in warnings if warning not in allowed]
 
 
 def _scene_package_context(config, config_path, manifest, archive_digest, runtime_record):
@@ -3232,9 +3248,10 @@ def _write_scene_checkpoint(path, manifest, expected_identity):
 
 def run_productive_scenes(config_path, *, blender_path):
     """Execute Stage 01 and Stage 02 with verified exclusive ZIP publication."""
-    config, errors, _, waves = load_and_validate_config(config_path)
-    if errors:
-        raise ValueError("invalid productive scenes profile: " + "; ".join(errors))
+    config, errors, warnings, waves = load_and_validate_config(config_path)
+    unexpected_warnings = _unexpected_scene_warnings(config, config_path, warnings) if config is not None else warnings
+    if errors or unexpected_warnings:
+        raise ValueError("invalid productive scenes profile: " + "; ".join(errors + unexpected_warnings))
     if not _is_productive_scenes_config(config) or _productive_stage(config, "02-blender-scenes")["adapter_status"] != "implemented":
         raise ValueError("run-productive-scenes requires the implemented productive Stage 01 + Stage 02 profile")
     root = Path(config_path).resolve().parent
@@ -3345,8 +3362,9 @@ def run_productive_scenes(config_path, *, blender_path):
         manifest["stages"][stage02["id"]] = candidate
         manifest_identity = _write_scene_checkpoint(manifest_path, manifest, manifest_identity)
         final_errors, final_warnings = validate_manifest_file(config_path, manifest_path)
-        if final_errors or final_warnings:
-            raise ValueError("final scene manifest validation failed: " + "; ".join(final_errors + final_warnings))
+        unexpected_warnings = _unexpected_scene_warnings(config, config_path, final_warnings)
+        if final_errors or unexpected_warnings:
+            raise ValueError("final scene manifest validation failed: " + "; ".join(final_errors + unexpected_warnings))
         return {"manifest_path": str(manifest_path), "run_id": run_id,
                 "stages": {key: value["status"] for key, value in manifest["stages"].items()}}
     except (Exception, KeyboardInterrupt) as exc:
