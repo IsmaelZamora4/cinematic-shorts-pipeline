@@ -160,11 +160,21 @@ El runner productivo actual solo cubre Stage 01/03 Kokoro. No existe ejecución 
 
 **Criterio para Phase 5B.3:** validar la trayectoria completa de cámara entre keyframes. La interpolación lineal independiente de posición y target puede producir posiciones coincidentes o un vector de dirección inválido en frames intermedios; el worker/verificador deberá detectar y rechazar esos casos antes de renderizar.
 
-## v0.10 — Phase 5B.3: Blender Runtime Preflight & Fixed Worker (en desarrollo)
+## v0.10 — Phase 5B.3: Blender Runtime Preflight & Fixed Worker (completada)
 
+- Phase 5B.3 se integró en `main` mediante merge commit `93f2cbce8ce20a84b8e661651813ff749b9d51f6`.
 - Se implementa preflight explícito y local de Blender 5.2.x; comprueba ruta absoluta, archivo ejecutable sin symlink/reparse point y versión observada, sin búsqueda en PATH ni instalación.
 - Se añade un worker fijo que acepta solo request acotado y `scene-spec v1`, configura `blender-scene-policy-v1` con Cycles CPU y staging exclusivo, y prepara `scene.blend` más 24 PNG.
 - El proceso padre supervisa timeout/cancelación y verifica el recibo y los outputs de staging. Continúa siendo autoridad de hashes, provenance y manifiesto; este incremento no publica ni permite completar Stage 02.
 - `run-productive-scenes` mantiene un fallo controlado tras el preflight: todavía no lanza el worker desde el flujo productivo.
 - Pruebas mock cubren preflight, request, cámara (incluida distancia mínima analítica), supervisión y cambios concurrentes de inputs. No se ejecuta Blender ni se generan medios reales.
 - Fuera de alcance de este incremento: decodificación PNG completa (5B.4), ZIP/publicación (5B.5) e integración productiva con gate local independiente (5B.6).
+
+## v0.10 — Phase 5B.4: Strict PNG RGB8 Decoder & Validation (en desarrollo)
+
+- Se añade un decodificador PNG read-only, de biblioteca estándar, para RGB8 no entrelazado a 540×960 y límite de 32 MiB por archivo.
+- Verifica estructura y CRC de chunks, zlib completo/checksum, 960 scanlines exactas y filtros 0–4 mediante reconstrucción incremental con dos filas de trabajo; no conserva el raster completo.
+- Acepta únicamente chunks auxiliares explícitos `cHRM`, `gAMA`, `pHYs`, `sRGB`, `tEXt` y `tIME`, con límites, orden y validación estructural; rechaza los demás chunks no definidos para este perfil.
+- Se mantiene independiente del worker, ZIP y publicación. Stage 02 sigue pending y no se habilita `run-productive-scenes`; no se ejecutan Blender ni renders.
+- Verificación local en Windows/Python 3.12: 249 pruebas; 245 aprobadas y 4 omitidas por permisos de symlink. `validate-skill.py` y `git diff --check` pasan. La ejecución real de Blender no se hizo.
+- CI multiplataforma para esta rama está pendiente. Phase 5B.5 (ZIP/publicación) y el gate local Blender real de 5B.6 siguen pendientes.
