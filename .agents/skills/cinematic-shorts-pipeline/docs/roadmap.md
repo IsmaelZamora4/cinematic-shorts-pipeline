@@ -159,3 +159,12 @@ El runner productivo actual solo cubre Stage 01/03 Kokoro. No existe ejecución 
 - Stage 02 permanece pending. No se implementaron worker, preflight Blender, render, decodificador PNG ni publicación ZIP; no se ejecutó Blender ni se generaron medios.
 
 **Criterio para Phase 5B.3:** validar la trayectoria completa de cámara entre keyframes. La interpolación lineal independiente de posición y target puede producir posiciones coincidentes o un vector de dirección inválido en frames intermedios; el worker/verificador deberá detectar y rechazar esos casos antes de renderizar.
+
+## v0.10 — Phase 5B.3: Blender Runtime Preflight & Fixed Worker (en desarrollo)
+
+- Se implementa preflight explícito y local de Blender 5.2.x; comprueba ruta absoluta, archivo ejecutable sin symlink/reparse point y versión observada, sin búsqueda en PATH ni instalación.
+- Se añade un worker fijo que acepta solo request acotado y `scene-spec v1`, configura `blender-scene-policy-v1` con Cycles CPU y staging exclusivo, y prepara `scene.blend` más 24 PNG.
+- El proceso padre supervisa timeout/cancelación y verifica el recibo y los outputs de staging. Continúa siendo autoridad de hashes, provenance y manifiesto; este incremento no publica ni permite completar Stage 02.
+- `run-productive-scenes` mantiene un fallo controlado tras el preflight: todavía no lanza el worker desde el flujo productivo.
+- Pruebas mock cubren preflight, request, cámara (incluida distancia mínima analítica), supervisión y cambios concurrentes de inputs. No se ejecuta Blender ni se generan medios reales.
+- Fuera de alcance de este incremento: decodificación PNG completa (5B.4), ZIP/publicación (5B.5) e integración productiva con gate local independiente (5B.6).
