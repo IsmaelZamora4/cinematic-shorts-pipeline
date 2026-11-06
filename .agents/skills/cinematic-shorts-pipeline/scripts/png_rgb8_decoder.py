@@ -160,7 +160,7 @@ class _RasterDecoder:
 
 def _valid_keyword(payload):
     separator = payload.find(b"\x00")
-    if separator < 1 or separator > 79 or separator == len(payload) - 1:
+    if separator < 1 or separator > 79 or payload.find(b"\x00", separator + 1) != -1:
         return False
     keyword = payload[:separator]
     if keyword[0] == 32 or keyword[-1] == 32 or b"  " in keyword:

@@ -1,6 +1,7 @@
 import struct
 import sys
 import unittest
+from unittest import mock
 import zlib
 from pathlib import Path
 
@@ -106,6 +107,14 @@ class PngRgb8DecoderTests(unittest.TestCase):
         png, _ = make_png(extra_chunks=ancillary)
         decoder.verify_png_rgb8(BoundedStream(png))
 
+    def test_accepts_text_chunk_with_empty_text_and_valid_crc(self):
+        png, _ = make_png(extra_chunks=[chunk(b"tEXt", b"Comment\x00")])
+        decoder.verify_png_rgb8(BoundedStream(png))
+
+    def test_rejects_text_chunk_with_extra_nul_and_valid_crc(self):
+        png, _ = make_png(extra_chunks=[chunk(b"tEXt", b"Comment\x00first\x00second")])
+        self.assert_rejected(png)
+
     def test_rejects_bad_signature_ihdr_dimensions_and_color_profiles(self):
         valid, _ = make_png()
         self.assert_rejected(b"X" + valid[1:])
@@ -194,7 +203,7 @@ class PngRgb8DecoderTests(unittest.TestCase):
         for truncated in (valid[:0], valid[:7], valid[:33], valid[:-20]):
             with self.subTest(length=len(truncated)):
                 self.assert_rejected(truncated)
-        with unittest.mock.patch.object(decoder, "MAX_PNG_BYTES", len(valid) - 1):
+        with mock.patch.object(decoder, "MAX_PNG_BYTES", len(valid) - 1):
             self.assert_rejected(valid)
 
     def test_reads_only_bounded_chunks_and_keeps_only_two_working_rows(self):
