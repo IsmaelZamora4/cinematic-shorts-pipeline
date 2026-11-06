@@ -4,8 +4,11 @@ import json
 import math
 import os
 import stat
+import struct
 import subprocess
+import sys
 import tempfile
+import types
 import unittest
 from contextlib import nullcontext
 from pathlib import Path
@@ -38,21 +41,19 @@ class BlenderPreflightTests(unittest.TestCase):
         completed = pipeline.subprocess.CompletedProcess(
             [str(self.executable), "--version"], 0, stdout="Blender 5.2.3\n", stderr="",
         )
-        with mock.patch.object(pipeline.subprocess, "run", return_value=completed) as run:
+        with mock.patch.object(pipeline, "_run_blender_version_probe", return_value=completed) as run:
             runtime = pipeline._preflight_blender_runtime(self.executable)
         self.assertEqual((5, 2, 3), runtime["version"])
         self.assertEqual("5.2.3", runtime["version_string"])
         self.assertEqual(str(self.executable), runtime["path"])
         args, kwargs = run.call_args
         self.assertEqual([str(self.executable), "--version"], args[0])
-        self.assertFalse(kwargs["shell"])
-        self.assertGreater(kwargs["timeout"], 0)
-        self.assertEqual(subprocess.DEVNULL, kwargs["stdin"])
+        self.assertEqual(self.executable.parent, args[1])
 
         completed = pipeline.subprocess.CompletedProcess(
             [str(self.executable), "--version"], 0, stdout="Blender 5.2.4 LTS\n", stderr="",
         )
-        with mock.patch.object(pipeline.subprocess, "run", return_value=completed):
+        with mock.patch.object(pipeline, "_run_blender_version_probe", return_value=completed):
             self.assertEqual((5, 2, 4), pipeline._preflight_blender_runtime(self.executable)["version"])
 
     def test_preflight_rejects_missing_nonregular_and_nonexecutable_paths(self):
@@ -77,7 +78,7 @@ class BlenderPreflightTests(unittest.TestCase):
             alias.symlink_to(self.executable)
         except (OSError, NotImplementedError) as exc:
             self.skipTest(f"symlink creation unavailable: {exc}")
-        with mock.patch.object(pipeline.subprocess, "run", side_effect=AssertionError("must not launch")):
+        with mock.patch.object(pipeline, "_run_blender_version_probe", side_effect=AssertionError("must not launch")):
             with self.assertRaisesRegex(ValueError, "symbolic link or reparse"):
                 pipeline._preflight_blender_runtime(alias)
 
@@ -93,16 +94,22 @@ class BlenderPreflightTests(unittest.TestCase):
         for returncode, stdout, message in cases:
             with self.subTest(message=message):
                 completed = pipeline.subprocess.CompletedProcess([], returncode, stdout=stdout, stderr="")
-                with mock.patch.object(pipeline.subprocess, "run", return_value=completed):
+                with mock.patch.object(pipeline, "_run_blender_version_probe", return_value=completed):
                     with self.assertRaisesRegex(ValueError, message):
                         pipeline._preflight_blender_runtime(self.executable)
 
     def test_preflight_converts_timeout_to_controlled_error(self):
-        with mock.patch.object(
-            pipeline.subprocess, "run", side_effect=pipeline.subprocess.TimeoutExpired([str(self.executable)], 10),
-        ):
+        with mock.patch.object(pipeline, "_run_blender_version_probe", side_effect=ValueError("Blender version probe timed out")):
             with self.assertRaisesRegex(ValueError, "version probe timed out"):
                 pipeline._preflight_blender_runtime(self.executable)
+
+    def test_real_process_output_is_bounded_and_timeout_is_enforced(self):
+        command = [sys.executable, "-c", "import os,time; os.write(1,b'x'*1048576); time.sleep(30)"]
+        with self.assertRaisesRegex(ValueError, "output exceeds"):
+            pipeline._run_blender_version_probe(command, self.root)
+        with mock.patch.object(pipeline, "BLENDER_PREFLIGHT_TIMEOUT_SECONDS", 0.3):
+            with self.assertRaisesRegex(ValueError, "timed out"):
+                pipeline._run_blender_version_probe([sys.executable, "-c", "import time; time.sleep(30)"], self.root)
 
 
 class BlenderWorkerCameraTests(unittest.TestCase):
@@ -132,6 +139,76 @@ class BlenderWorkerCameraTests(unittest.TestCase):
         spec["camera"]["keyframes"][0]["location_m"][0] = float("nan")
         with self.assertRaisesRegex(ValueError, "finite"):
             worker._camera_samples(spec)
+
+
+class BlenderWorkerRuntimeTests(unittest.TestCase):
+    def test_main_reaches_actual_bpy_version_check(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            request = {
+                "request_version": 1, "project_id": "test-project",
+                "scene_spec": make_valid_scene_spec(), "expected_blender_version": [5, 2, 3],
+                "expected_blender_version_string": "5.2.3", "staging_root": str(root),
+            }
+            request_path = root / "request.json"
+            request_path.write_text(json.dumps(request), encoding="utf-8")
+            bpy = types.SimpleNamespace(app=types.SimpleNamespace(
+                version=(5, 2, 3), version_string="5.2.3", version_cycle="release",
+                build_options=types.SimpleNamespace(cycles=True),
+            ))
+            with (
+                mock.patch.dict(sys.modules, {"bpy": bpy, "mathutils": types.SimpleNamespace(Vector=object)}),
+                mock.patch.object(worker, "_configure_scene", side_effect=RuntimeError("version accepted")) as configure,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "version accepted"):
+                    worker.main(["--request", str(request_path)])
+            configure.assert_called_once()
+
+    def test_blender_52_channelbags_set_camera_and_seed_interpolation(self):
+        slot = object()
+        def curve(path, index):
+            return types.SimpleNamespace(data_path=path, array_index=index, keyframe_points=[
+                types.SimpleNamespace(interpolation="BEZIER", co=(frame, 0)) for frame in range(24)
+            ])
+        camera_curves = [curve("location", i) for i in range(3)] + [curve("rotation_quaternion", i) for i in range(4)]
+        seed_curves = [curve("cycles.seed", 0)]
+        def owner(curves):
+            bag = types.SimpleNamespace(fcurves=curves)
+            strip = types.SimpleNamespace(type="KEYFRAME", channelbag=mock.Mock(return_value=bag))
+            action = types.SimpleNamespace(layers=[types.SimpleNamespace(strips=[strip])])
+            return types.SimpleNamespace(animation_data=types.SimpleNamespace(action=action, action_slot=slot)), strip
+        camera, camera_strip = owner(camera_curves)
+        scene, seed_strip = owner(seed_curves)
+        worker._set_action_interpolation(camera, {"location": 3, "rotation_quaternion": 4}, "LINEAR")
+        worker._set_action_interpolation(scene, {"cycles.seed": 1}, "CONSTANT")
+        camera_strip.channelbag.assert_called_once_with(slot)
+        seed_strip.channelbag.assert_called_once_with(slot)
+        self.assertTrue(all(point.interpolation == "LINEAR" for curve in camera_curves for point in curve.keyframe_points))
+        self.assertTrue(all(point.interpolation == "CONSTANT" for point in seed_curves[0].keyframe_points))
+        with self.assertRaisesRegex(RuntimeError, "missing required"):
+            worker._set_action_interpolation(scene, {"missing": 1}, "CONSTANT")
+
+    def test_float32_properties_and_sockets_allow_rounding_but_not_policy_changes(self):
+        def f32(value):
+            return struct.unpack("f", struct.pack("f", value))[0]
+        class Quantized:
+            def __setattr__(self, name, value):
+                if isinstance(value, float):
+                    value = f32(value)
+                elif isinstance(value, tuple):
+                    value = tuple(f32(x) for x in value)
+                object.__setattr__(self, name, value)
+        prop = Quantized()
+        prop.value = 0.0
+        for value in (0.4, 0.6, 0.82, 0.01):
+            worker._set_value(prop, "value", value, "test")
+        socket = Quantized()
+        socket.default_value = (0.0, 0.0, 0.0, 0.0)
+        node = types.SimpleNamespace(inputs={"Color": socket})
+        worker._set_socket(node, "Color", (0.4, 0.6, 0.82, 1.0))
+        self.assertFalse(worker._matches_value(f32(0.41), 0.4))
+        self.assertFalse(worker._matches_value(1, True))
+        self.assertFalse(worker._matches_value(1.0, 1))
 
 
 class BlenderWorkerRequestTests(unittest.TestCase):

@@ -12,6 +12,7 @@ import stat
 import struct
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -1464,6 +1465,67 @@ def _parse_blender_version_output(stdout, stderr=""):
     return version
 
 
+def _run_blender_version_probe(command, cwd):
+    """Capture at most the allowed version output while supervising the process."""
+    options = {
+        "stdin": subprocess.DEVNULL, "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT,
+        "shell": False, "cwd": cwd,
+    }
+    if os.name == "nt":
+        options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+    else:
+        options["start_new_session"] = True
+    process = subprocess.Popen(command, **options)
+    job = None
+    reader = None
+    captured = bytearray()
+    errors = []
+    oversized = threading.Event()
+    succeeded = False
+
+    def read_output():
+        try:
+            while True:
+                chunk = process.stdout.read1(4096)
+                if not chunk:
+                    return
+                remaining = MAX_BLENDER_PREFLIGHT_OUTPUT_BYTES - len(captured)
+                captured.extend(chunk[:max(remaining, 0)])
+                if len(chunk) > remaining:
+                    oversized.set()
+                    return
+        except (OSError, ValueError) as exc:
+            errors.append(exc)
+
+    try:
+        if os.name == "nt":
+            job = _attach_windows_job(process)
+        deadline = time.monotonic() + BLENDER_PREFLIGHT_TIMEOUT_SECONDS
+        reader = threading.Thread(target=read_output, daemon=True)
+        reader.start()
+        reader.join(max(0, deadline - time.monotonic()))
+        if reader.is_alive():
+            raise ValueError("Blender version probe timed out")
+        if oversized.is_set():
+            raise ValueError(f"Blender version probe output exceeds {MAX_BLENDER_PREFLIGHT_OUTPUT_BYTES} bytes")
+        if errors:
+            raise ValueError("Blender version probe output could not be read") from errors[0]
+        try:
+            returncode = process.wait(timeout=max(0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired as exc:
+            raise ValueError("Blender version probe timed out") from exc
+        succeeded = True
+        return subprocess.CompletedProcess(command, returncode, stdout=bytes(captured), stderr=b"")
+    finally:
+        if not succeeded:
+            _terminate_blender_process_tree(process, job)
+        if job is not None:
+            job.close()
+        if reader is not None:
+            reader.join(timeout=BLENDER_TERMINATION_GRACE_SECONDS)
+        process.stdout.close()
+
+
 def _preflight_blender_runtime(blender_path):
     """Check one explicit local Blender executable and observe its actual 5.2.x version."""
     if not isinstance(blender_path, (str, os.PathLike)) or not str(blender_path).strip():
@@ -1481,19 +1543,7 @@ def _preflight_blender_runtime(blender_path):
         raise ValueError("Blender executable does not have execution permission")
 
     command = [str(executable), "--version"]
-    try:
-        completed = subprocess.run(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=BLENDER_PREFLIGHT_TIMEOUT_SECONDS,
-            check=False,
-            shell=False,
-            cwd=executable.parent,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise ValueError("Blender version probe timed out") from exc
+    completed = _run_blender_version_probe(command, executable.parent)
     if completed.returncode != 0:
         raise ValueError(f"Blender version probe failed with exit code {completed.returncode}")
     version = _parse_blender_version_output(completed.stdout, completed.stderr)

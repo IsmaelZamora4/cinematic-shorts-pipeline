@@ -360,7 +360,7 @@ class ProductiveScenesProfileTests(unittest.TestCase):
         before = sorted(path.relative_to(self.root).as_posix() for path in self.root.rglob("*"))
         output = io.StringIO()
         with (
-            mock.patch.object(subprocess, "run", side_effect=self.successful_blender_version_probe) as probe,
+            mock.patch.object(pipeline, "_run_blender_version_probe", side_effect=self.successful_blender_version_probe) as probe,
             mock.patch.object(pipeline, "_run_blender_scenes_worker", side_effect=AssertionError("worker must not start")),
             contextlib.redirect_stdout(output),
         ):
@@ -374,7 +374,7 @@ class ProductiveScenesProfileTests(unittest.TestCase):
 
     def test_cli_rejects_relative_blender_path_without_starting_anything(self):
         output = io.StringIO()
-        with mock.patch.object(subprocess, "run", side_effect=AssertionError("Blender must not start")), contextlib.redirect_stdout(output):
+        with mock.patch.object(pipeline, "_run_blender_version_probe", side_effect=AssertionError("Blender must not start")), contextlib.redirect_stdout(output):
             result = pipeline.main(["run-productive-scenes", str(self.config_path), "--blender", "blender"])
         self.assertEqual(1, result)
         self.assertIn("must be an absolute path", output.getvalue())
@@ -384,7 +384,7 @@ class ProductiveScenesProfileTests(unittest.TestCase):
         self.write_config()
         blender_path = self.fake_blender_executable()
         output = io.StringIO()
-        with mock.patch.object(subprocess, "run", side_effect=AssertionError("Blender must not start")), contextlib.redirect_stdout(output):
+        with mock.patch.object(pipeline, "_run_blender_version_probe", side_effect=AssertionError("Blender must not start")), contextlib.redirect_stdout(output):
             result = pipeline.main(["run-productive-scenes", str(self.config_path), "--blender", str(blender_path)])
         self.assertEqual(1, result)
         self.assertIn("invalid productive scenes profile", output.getvalue())

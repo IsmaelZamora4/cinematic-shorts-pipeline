@@ -16,6 +16,10 @@ MAX_RESPONSE_BYTES = 64 * 1024
 MIN_CAMERA_TARGET_DISTANCE_M = 0.01
 CAMERA_UP_WORLD = (0.0, 0.0, 1.0)
 WORKER_VERSION = 1
+BLENDER_VERSION_PATTERN = re.compile(r"Blender (\d+)\.(\d+)\.(\d+)")
+# Blender stores many RNA properties as float32; allow its rounding, not policy changes.
+FLOAT_REL_TOL = 1e-6
+FLOAT_ABS_TOL = 1e-7
 MAX_SCENE_BLEND_BYTES = 512 * 1024 * 1024
 MAX_FRAME_PNG_BYTES = 32 * 1024 * 1024
 EXPECTED_SPEC_FIELDS = {
@@ -234,12 +238,26 @@ def _camera_samples(scene_spec):
     return samples, minimum_distance
 
 
+def _matches_value(actual, expected):
+    if isinstance(expected, float):
+        return isinstance(actual, (int, float)) and not isinstance(actual, bool) and math.isclose(
+            actual, expected, rel_tol=FLOAT_REL_TOL, abs_tol=FLOAT_ABS_TOL,
+        )
+    if isinstance(expected, (tuple, list)):
+        try:
+            values = tuple(actual)
+        except TypeError:
+            return False
+        return len(values) == len(expected) and all(_matches_value(a, b) for a, b in zip(values, expected))
+    return type(actual) is type(expected) and actual == expected
+
+
 def _set_value(owner, attribute, value, label):
     if not hasattr(owner, attribute):
         raise RuntimeError(f"Blender 5.2.x does not expose required setting {label}")
     setattr(owner, attribute, value)
     actual = getattr(owner, attribute)
-    if actual != value:
+    if not _matches_value(actual, value):
         raise RuntimeError(f"Blender did not retain required setting {label}")
 
 
@@ -252,11 +270,7 @@ def _set_socket(node, name, value, *, required=True):
     if not hasattr(socket, "default_value"):
         raise RuntimeError(f"Blender Principled BSDF socket {name} has no default value")
     socket.default_value = value
-    if isinstance(value, (tuple, list)):
-        matches = tuple(socket.default_value) == tuple(value)
-    else:
-        matches = socket.default_value == value
-    if not matches:
+    if not _matches_value(socket.default_value, value):
         raise RuntimeError(f"Blender did not retain required material socket {name}")
 
 
@@ -273,9 +287,9 @@ def _make_materials(bpy, spec):
         output.location = (300, 0)
         material.node_tree.links.new(shader.outputs["BSDF"], output.inputs["Surface"])
 
-        _set_socket(shader, "Base Color", tuple(item["base_color_linear_rgba"]))
-        _set_socket(shader, "Metallic", item["metallic"])
-        _set_socket(shader, "Roughness", item["roughness"])
+        _set_socket(shader, "Base Color", tuple(map(float, item["base_color_linear_rgba"])))
+        _set_socket(shader, "Metallic", float(item["metallic"]))
+        _set_socket(shader, "Roughness", float(item["roughness"]))
         _set_socket(shader, "Alpha", 1.0)
         _set_socket(shader, "IOR", 1.5)
         _set_socket(shader, "Emission Color", (0.0, 0.0, 0.0, 1.0))
@@ -338,6 +352,39 @@ def _aim_at(obj, target, Vector):
     if direction.cross(Vector(CAMERA_UP_WORLD)).length <= direction.length * 1e-8:
         raise RuntimeError(f"object {obj.name} has an invalid up orientation")
     obj.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
+
+
+def _set_action_interpolation(owner, expected_paths, interpolation):
+    animation = owner.animation_data
+    if animation is None or animation.action is None or animation.action_slot is None:
+        raise RuntimeError("Blender did not create an action and slot for the keyframes")
+    found = set()
+    for layer in animation.action.layers:
+        for strip in layer.strips:
+            if strip.type != "KEYFRAME":
+                continue
+            bag = strip.channelbag(animation.action_slot)
+            if bag is None:
+                continue
+            for curve in bag.fcurves:
+                if curve.data_path not in expected_paths:
+                    continue
+                channel = (curve.data_path, curve.array_index)
+                if channel in found or not 0 <= curve.array_index < expected_paths[curve.data_path]:
+                    raise RuntimeError("Blender action contains an unexpected animation curve")
+                found.add(channel)
+                if len(curve.keyframe_points) != 24 or any(
+                    not math.isclose(point.co[0], frame, abs_tol=1e-6)
+                    for frame, point in enumerate(curve.keyframe_points)
+                ):
+                    raise RuntimeError("Blender action does not contain the expected 24 keyframes")
+                for point in curve.keyframe_points:
+                    point.interpolation = interpolation
+                    if point.interpolation != interpolation:
+                        raise RuntimeError("Blender did not retain keyframe interpolation")
+    expected = {(path, index) for path, count in expected_paths.items() for index in range(count)}
+    if found != expected:
+        raise RuntimeError("Blender action is missing required animation curves")
 
 
 def _configure_scene(bpy, spec, staging_root):
@@ -420,8 +467,9 @@ def _configure_scene(bpy, spec, staging_root):
         obj.location = tuple(item["location_m"])
         _aim_at(obj, item["target_m"], Vector)
         if (
-            data.shape != "SQUARE" or data.size != item["size_m"] or data.energy != item["power_w"]
-            or tuple(data.color) != tuple(item["color_linear_rgb"])
+            data.shape != "SQUARE" or not _matches_value(data.size, float(item["size_m"]))
+            or not _matches_value(data.energy, float(item["power_w"]))
+            or not _matches_value(data.color, tuple(map(float, item["color_linear_rgb"])))
         ):
             raise RuntimeError(f"Blender did not retain effective light settings for {item['id']}")
 
@@ -444,17 +492,7 @@ def _configure_scene(bpy, spec, staging_root):
         )
         camera_obj.keyframe_insert(data_path="location", frame=sample["frame"])
         camera_obj.keyframe_insert(data_path="rotation_quaternion", frame=sample["frame"])
-    animation = camera_obj.animation_data
-    if animation and animation.action:
-        for curve in animation.action.fcurves:
-            for point in curve.keyframe_points:
-                point.interpolation = "LINEAR"
-    if scene.animation_data and scene.animation_data.action:
-        for curve in scene.animation_data.action.fcurves:
-            if curve.data_path == "cycles.seed":
-                for point in curve.keyframe_points:
-                    point.interpolation = "CONSTANT"
-    scene.frame_set(0)
+    _set_action_interpolation(camera_obj, {"location": 3, "rotation_quaternion": 4}, "LINEAR")
 
     output_root = Path(staging_root) / "scenes"
     output_root.mkdir(mode=0o700)
@@ -467,13 +505,16 @@ def _configure_scene(bpy, spec, staging_root):
     scene.frame_end = 23
     for frame in range(24):
         scene.cycles.seed = (spec["render"]["seed"] + frame) % 2147483648
-        scene.cycles.keyframe_insert(data_path="seed", frame=frame)
+        scene.keyframe_insert(data_path="cycles.seed", frame=frame)
+    _set_action_interpolation(scene, {"cycles.seed": 1}, "CONSTANT")
+    scene.frame_set(0)
     if (
         scene.render.engine != "CYCLES" or cycles.device != "CPU" or cycles.samples != 8
         or render.threads != 2 or render.fps != 12 or (render.resolution_x, render.resolution_y) != (540, 960)
-        or camera_data.sensor_fit != "VERTICAL" or camera_data.sensor_width != 36.0
-        or camera_data.lens != spec["camera"]["lens_mm"] or camera_data.clip_start != 0.01
-        or camera_data.clip_end != 100.0 or camera_data.dof.use_dof is not False
+        or camera_data.sensor_fit != "VERTICAL" or not _matches_value(camera_data.sensor_width, 36.0)
+        or not _matches_value(camera_data.lens, float(spec["camera"]["lens_mm"]))
+        or not _matches_value(camera_data.clip_start, 0.01)
+        or not _matches_value(camera_data.clip_end, 100.0) or camera_data.dof.use_dof is not False
         or (scene.frame_start, scene.frame_end) != (0, 23)
     ):
         raise RuntimeError("Blender effective scene settings differ from blender-scene-policy-v1")
