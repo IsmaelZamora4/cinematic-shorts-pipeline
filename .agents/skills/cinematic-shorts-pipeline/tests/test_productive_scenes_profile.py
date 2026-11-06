@@ -103,6 +103,54 @@ class ProductiveScenesProfileTests(unittest.TestCase):
         self.write_config()
         self.assertTrue(any("required blender-scene-spec" in error for error in self.errors()))
 
+    def test_rejects_profile_when_scene_spec_resource_is_missing(self):
+        self.config["project"]["resources"] = []
+        self.write_config()
+        errors = self.errors()
+        self.assertTrue(any("productive scene profile requires exactly one" in error for error in errors), errors)
+        self.assertTrue(any("unknown input or artifact: resource-scene-spec" in error for error in errors), errors)
+
+    def test_rejects_scene_spec_resource_with_altered_kind(self):
+        self.config["project"]["resources"][0]["kind"] = "generic-json"
+        self.write_config()
+        self.assertTrue(any("requires exactly one required blender-scene-spec" in error for error in self.errors()))
+
+    def test_rejects_scene_profile_with_altered_stage_02_adapter(self):
+        next(stage for stage in self.config["stages"] if stage["id"] == "02-blender-scenes")["adapter"] = "generic-renderer"
+        self.write_config()
+        self.assertTrue(any("productive scene profile Stage 02 adapter must be blender-scenes" in error for error in self.errors()))
+
+    def test_rejects_implemented_stage_02_without_scene_profile_contract(self):
+        shutil.copyfile(ROOT / "templates" / "storyboard.json", self.root / "storyboard.json")
+        config = make_config(self.root)
+        config["profile"]["fps"] = 12
+        next(stage for stage in config["stages"] if stage["id"] == "02-blender-scenes")["adapter_status"] = "implemented"
+        self.config = config
+        self.write_config()
+        self.assertTrue(any("productive scene profile" in error for error in self.errors()))
+
+    def test_rejects_ambiguous_multiple_scene_spec_declarations(self):
+        second = dict(self.config["project"]["resources"][0], id="scene-spec-secondary", path="scene-spec-secondary.json")
+        self.config["project"]["resources"].append(second)
+        (self.root / second["path"]).write_text('{"scene_spec_version":1}\n', encoding="utf-8")
+        validation = next(stage for stage in self.config["stages"] if stage["id"] == "01-validate-project")
+        validation["inputs"].append("resource-scene-spec-secondary")
+        self.write_config()
+        self.assertTrue(any("requires exactly one required blender-scene-spec" in error for error in self.errors()))
+
+    def test_legacy_declarative_blender_config_is_not_misclassified(self):
+        shutil.copyfile(ROOT / "templates" / "storyboard.json", self.root / "storyboard.json")
+        legacy = make_config(self.root)
+        legacy["project"]["resources"] = [{"id": "geometry", "path": "geometry.json", "required": True, "kind": "generic-json"}]
+        (self.root / "geometry.json").write_text("{}\n", encoding="utf-8")
+        next(stage for stage in legacy["stages"] if stage["id"] == "02-blender-scenes")["inputs"].append("resource-geometry")
+        legacy_path = self.root / "legacy-pipeline.json"
+        legacy_path.write_text(json.dumps(legacy), encoding="utf-8")
+        loaded, errors, _, _ = pipeline.load_and_validate_config(legacy_path)
+        self.assertEqual([], errors)
+        self.assertFalse(pipeline._intends_productive_scenes_config(loaded))
+        self.assertFalse(pipeline._is_productive_scenes_config(loaded))
+
     def test_rejects_profile_or_storyboard_outside_the_fixed_mvp_timeline(self):
         self.config["profile"]["fps"] = 30
         self.write_config()
@@ -234,6 +282,22 @@ class ProductiveScenesProfileTests(unittest.TestCase):
         errors, _ = pipeline.validate_manifest_file(self.config_path, manifest_path)
         self.assertTrue(any("cannot be completed while its adapter is pending" in error for error in errors), errors)
 
+    def test_manifest_cannot_accept_completed_stage_02_after_contract_markers_are_altered(self):
+        stage = next(stage for stage in self.config["stages"] if stage["id"] == "02-blender-scenes")
+        stage["adapter_status"] = "implemented"
+        stage["adapter"] = "other-renderer"
+        self.write_config()
+        manifest = pipeline.new_pending_manifest(self.config, self.config_path)
+        manifest["stages"]["02-blender-scenes"].update(
+            status="completed", attempts=1, stage_fingerprint="0" * 64,
+            artifacts=[{"id": "scene-package", "path": ".pipeline/work/scenes.zip", "sha256": "0" * 64}],
+            tool_versions={"blender": "5.2.3"},
+        )
+        manifest_path = self.root / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        errors, _ = pipeline.validate_manifest_file(self.config_path, manifest_path)
+        self.assertTrue(any("Stage 02 remains pending" in error for error in errors), errors)
+
     def test_cli_is_a_controlled_unavailable_failure_without_writes_or_processes(self):
         before = sorted(path.relative_to(self.root).as_posix() for path in self.root.rglob("*"))
         output = io.StringIO()
@@ -250,6 +314,16 @@ class ProductiveScenesProfileTests(unittest.TestCase):
             result = pipeline.main(["run-productive-scenes", str(self.config_path), "--blender", "blender"])
         self.assertEqual(1, result)
         self.assertIn("must be an absolute path", output.getvalue())
+
+    def test_cli_rejects_inconsistent_profile_before_adapter_unavailable_response(self):
+        next(stage for stage in self.config["stages"] if stage["id"] == "02-blender-scenes")["adapter"] = "changed-adapter"
+        self.write_config()
+        output = io.StringIO()
+        with mock.patch.object(subprocess, "run", side_effect=AssertionError("Blender must not start")), contextlib.redirect_stdout(output):
+            result = pipeline.main(["run-productive-scenes", str(self.config_path), "--blender", str((self.root / "blender.exe").resolve())])
+        self.assertEqual(1, result)
+        self.assertIn("invalid productive scenes profile", output.getvalue())
+        self.assertNotIn("adapter is not available", output.getvalue())
 
 
 if __name__ == "__main__":

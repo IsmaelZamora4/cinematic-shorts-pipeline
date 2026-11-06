@@ -566,7 +566,7 @@ def validate_config(data, config_path, captured_resources=None):
                 if not allowed:
                     errors.append(f"{output_label}.path must be under workspace.intermediate_dir or workspace.artifact_dir")
 
-    if _is_productive_scenes_config(data):
+    if _intends_productive_scenes_config(data):
         validation_stage = by_id.get("01-validate-project", {})
         scene_stage = by_id.get("02-blender-scenes", {})
         if not isinstance(profile, dict) or (profile.get("width"), profile.get("height"), profile.get("fps")) != (540, 960, 12):
@@ -588,16 +588,26 @@ def validate_config(data, config_path, captured_resources=None):
             (resource_id, resource) for resource_id, resource in project_resources.items()
             if resource.get("kind") == "blender-scene-spec"
         ]
+        if scene_stage.get("adapter") != "blender-scenes":
+            errors.append("productive scene profile Stage 02 adapter must be blender-scenes")
+        if scene_stage.get("adapter_status") != "pending":
+            errors.append("productive scene profile Stage 02 remains pending until a real adapter is available")
+        if scene_stage.get("depends_on") != ["01-validate-project"]:
+            errors.append("productive 02-blender-scenes must depend exclusively on 01-validate-project")
+        if scene_stage.get("tools") != ["blender"] or "blender" not in tool_by_id:
+            errors.append("productive 02-blender-scenes must declare the blender tool only")
+        outputs = scene_stage.get("outputs", [])
+        if (
+            not isinstance(outputs, list) or len(outputs) != 1 or not isinstance(outputs[0], dict)
+            or outputs[0].get("id") != "scene-package"
+            or not isinstance(outputs[0].get("path"), str)
+            or PurePosixPath(outputs[0]["path"]).suffix.lower() != ".zip"
+        ):
+            errors.append("productive 02-blender-scenes must declare one scene-package ZIP output")
         if len(scene_specs) != 1 or scene_specs[0][1].get("required") is not True:
             errors.append("productive scene profile requires exactly one required blender-scene-spec resource")
         else:
             scene_spec_input = f"resource-{scene_specs[0][0]}"
-            if scene_stage.get("adapter") != "blender-scenes":
-                errors.append("productive scene profile Stage 02 adapter must be blender-scenes")
-            if scene_stage.get("adapter_status") != "pending":
-                errors.append("productive scene profile Stage 02 remains pending until a real adapter is available")
-            if scene_stage.get("depends_on") != ["01-validate-project"]:
-                errors.append("productive 02-blender-scenes must depend exclusively on 01-validate-project")
             expected_scene_inputs = {"storyboard", "validated-plan", scene_spec_input}
             scene_inputs = scene_stage.get("inputs")
             if (
@@ -607,16 +617,6 @@ def validate_config(data, config_path, captured_resources=None):
                 or len(scene_inputs) != len(expected_scene_inputs)
             ):
                 errors.append("productive 02-blender-scenes.inputs must contain storyboard, validated-plan, and the declared scene spec only")
-            if scene_stage.get("tools") != ["blender"] or "blender" not in tool_by_id:
-                errors.append("productive 02-blender-scenes must declare the blender tool only")
-            outputs = scene_stage.get("outputs", [])
-            if (
-                not isinstance(outputs, list) or len(outputs) != 1 or not isinstance(outputs[0], dict)
-                or outputs[0].get("id") != "scene-package"
-                or not isinstance(outputs[0].get("path"), str)
-                or PurePosixPath(outputs[0]["path"]).suffix.lower() != ".zip"
-            ):
-                errors.append("productive 02-blender-scenes must declare one scene-package ZIP output")
 
         if validation_stage.get("adapter") != "builtin-validation" or validation_stage.get("adapter_status") != "implemented":
             errors.append("productive scene profile requires implemented builtin-validation on Stage 01")
@@ -1524,20 +1524,86 @@ def _is_productive_tts_config(config):
     )
 
 
-def _is_productive_scenes_config(config):
-    """Identify the opt-in Blender scene profile by its declared scene-spec resource."""
+def _intends_productive_scenes_config(config):
+    """Detect a Blender profile attempt even when one of its contract markers is wrong or missing."""
     project = config.get("project") if isinstance(config, dict) else None
     resources = project.get("resources", []) if isinstance(project, dict) else []
-    has_scene_spec = any(
-        isinstance(resource, dict) and resource.get("kind") == "blender-scene-spec"
-        for resource in resources
-    ) if isinstance(resources, list) else False
     stages = config.get("stages", []) if isinstance(config, dict) else []
     stage02 = next(
         (item for item in stages if isinstance(item, dict) and item.get("id") == "02-blender-scenes"),
         None,
     ) if isinstance(stages, list) else None
-    return has_scene_spec and isinstance(stage02, dict) and stage02.get("adapter") == "blender-scenes"
+    if not isinstance(stage02, dict):
+        return False
+    profile = config.get("profile") if isinstance(config, dict) else None
+    has_scene_timeline = isinstance(profile, dict) and profile.get("fps") == 12
+    has_scene_timeline = has_scene_timeline or any(
+        isinstance(resource, dict) and resource.get("kind") == "blender-scene-spec"
+        for resource in resources
+    ) if isinstance(resources, list) else has_scene_timeline
+    if stage02.get("adapter_status") == "implemented" and has_scene_timeline:
+        return True
+    if isinstance(resources, list) and any(
+        isinstance(resource, dict)
+        and (resource.get("kind") == "blender-scene-spec" or resource.get("id") == "scene-spec")
+        for resource in resources
+    ):
+        return True
+    outputs = stage02.get("outputs", [])
+    has_scene_spec_input = isinstance(stage02.get("inputs"), list) and "resource-scene-spec" in stage02["inputs"]
+    has_scene_package = isinstance(outputs, list) and any(
+        isinstance(output, dict) and output.get("id") == "scene-package"
+        and isinstance(output.get("path"), str)
+        and PurePosixPath(output["path"]).suffix.lower() == ".zip"
+        for output in outputs
+    )
+    return has_scene_spec_input or has_scene_package
+
+
+def _is_productive_scenes_config(config):
+    """Return whether a scene-profile declaration matches the 5B.1 eligibility signature."""
+    project = config.get("project") if isinstance(config, dict) else None
+    resources = project.get("resources", []) if isinstance(project, dict) else []
+    stages = config.get("stages", []) if isinstance(config, dict) else []
+    if not isinstance(resources, list) or not isinstance(stages, list) or not _intends_productive_scenes_config(config):
+        return False
+    by_id = {stage.get("id"): stage for stage in stages if isinstance(stage, dict)}
+    stage01, stage02 = by_id.get("01-validate-project"), by_id.get("02-blender-scenes")
+    specs = [item for item in resources if isinstance(item, dict) and item.get("kind") == "blender-scene-spec"]
+    if len(specs) != 1 or specs[0].get("required") is not True or not isinstance(stage01, dict) or not isinstance(stage02, dict):
+        return False
+    spec_input = f"resource-{specs[0].get('id')}"
+    required_inputs = {"pipeline-config", "storyboard"} | {
+        f"resource-{item.get('id')}" for item in resources if isinstance(item, dict) and item.get("required") is True
+    }
+    scene_inputs = stage02.get("inputs")
+    validation_inputs = stage01.get("inputs")
+    outputs = stage02.get("outputs")
+    if (
+        stage01.get("adapter") != "builtin-validation" or stage01.get("adapter_status") != "implemented"
+        or stage01.get("depends_on") != [] or not isinstance(validation_inputs, list)
+        or any(not isinstance(item, str) for item in validation_inputs)
+        or set(validation_inputs) != required_inputs or len(validation_inputs) != len(required_inputs)
+        or not isinstance(stage01.get("outputs"), list)
+        or [item.get("id") for item in stage01["outputs"] if isinstance(item, dict)] != ["validated-plan"]
+        or stage02.get("adapter") != "blender-scenes" or stage02.get("adapter_status") != "pending"
+        or stage02.get("depends_on") != ["01-validate-project"]
+        or not isinstance(scene_inputs, list)
+        or any(not isinstance(item, str) for item in scene_inputs)
+        or set(scene_inputs) != {"storyboard", "validated-plan", spec_input}
+        or len(scene_inputs) != 3 or stage02.get("tools") != ["blender"]
+        or not isinstance(outputs, list) or len(outputs) != 1 or not isinstance(outputs[0], dict)
+        or outputs[0].get("id") != "scene-package"
+        or not isinstance(outputs[0].get("path"), str) or PurePosixPath(outputs[0]["path"]).suffix.lower() != ".zip"
+    ):
+        return False
+    profile = config.get("profile")
+    if not isinstance(profile, dict) or (profile.get("width"), profile.get("height"), profile.get("fps")) != (540, 960, 12):
+        return False
+    return all(
+        stage_id == "01-validate-project" or stage.get("adapter_status") == "pending"
+        for stage_id, stage in by_id.items()
+    )
 
 
 def _productive_paths(root, stage):
