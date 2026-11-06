@@ -566,6 +566,85 @@ def validate_config(data, config_path, captured_resources=None):
                 if not allowed:
                     errors.append(f"{output_label}.path must be under workspace.intermediate_dir or workspace.artifact_dir")
 
+    if _intends_productive_scenes_config(data):
+        validation_stage = by_id.get("01-validate-project", {})
+        scene_stage = by_id.get("02-blender-scenes", {})
+        if not isinstance(profile, dict) or (profile.get("width"), profile.get("height"), profile.get("fps")) != (540, 960, 12):
+            errors.append("productive scene profile requires 540x960 at 12 FPS")
+        storyboard_scenes = storyboard.get("scenes") if isinstance(storyboard, dict) else None
+        if (
+            not isinstance(storyboard, dict)
+            or storyboard.get("aspect_ratio") != "9:16"
+            or storyboard.get("fps") != 12
+            or storyboard.get("total_frames") != 24
+            or not isinstance(storyboard_scenes, list)
+            or len(storyboard_scenes) != 1
+            or not isinstance(storyboard_scenes[0], dict)
+            or storyboard_scenes[0].get("start_frame") != 0
+            or storyboard_scenes[0].get("end_frame") != 24
+        ):
+            errors.append("productive scene profile requires one storyboard scene covering [0,24) at 9:16 and 12 FPS")
+        scene_specs = [
+            (resource_id, resource) for resource_id, resource in project_resources.items()
+            if resource.get("kind") == "blender-scene-spec"
+        ]
+        if scene_stage.get("adapter") != "blender-scenes":
+            errors.append("productive scene profile Stage 02 adapter must be blender-scenes")
+        if scene_stage.get("adapter_status") != "pending":
+            errors.append("productive scene profile Stage 02 remains pending until a real adapter is available")
+        if scene_stage.get("depends_on") != ["01-validate-project"]:
+            errors.append("productive 02-blender-scenes must depend exclusively on 01-validate-project")
+        if scene_stage.get("tools") != ["blender"] or "blender" not in tool_by_id:
+            errors.append("productive 02-blender-scenes must declare the blender tool only")
+        outputs = scene_stage.get("outputs", [])
+        if (
+            not isinstance(outputs, list) or len(outputs) != 1 or not isinstance(outputs[0], dict)
+            or outputs[0].get("id") != "scene-package"
+            or not isinstance(outputs[0].get("path"), str)
+            or PurePosixPath(outputs[0]["path"]).suffix.lower() != ".zip"
+        ):
+            errors.append("productive 02-blender-scenes must declare one scene-package ZIP output")
+        if len(scene_specs) != 1 or scene_specs[0][1].get("required") is not True:
+            errors.append("productive scene profile requires exactly one required blender-scene-spec resource")
+        else:
+            scene_spec_input = f"resource-{scene_specs[0][0]}"
+            expected_scene_inputs = {"storyboard", "validated-plan", scene_spec_input}
+            scene_inputs = scene_stage.get("inputs")
+            if (
+                not isinstance(scene_inputs, list)
+                or any(not isinstance(item, str) for item in scene_inputs)
+                or set(scene_inputs) != expected_scene_inputs
+                or len(scene_inputs) != len(expected_scene_inputs)
+            ):
+                errors.append("productive 02-blender-scenes.inputs must contain storyboard, validated-plan, and the declared scene spec only")
+
+        if validation_stage.get("adapter") != "builtin-validation" or validation_stage.get("adapter_status") != "implemented":
+            errors.append("productive scene profile requires implemented builtin-validation on Stage 01")
+        if validation_stage.get("depends_on") != []:
+            errors.append("productive scene profile Stage 01 must have no dependencies")
+        validation_outputs = validation_stage.get("outputs", [])
+        validation_output_ids = [item.get("id") for item in validation_outputs if isinstance(item, dict)] if isinstance(validation_outputs, list) else []
+        if validation_output_ids != ["validated-plan"]:
+            errors.append("productive scene profile Stage 01 must declare exactly validated-plan output")
+        required_validation_inputs = {"pipeline-config", "storyboard"} | {
+            f"resource-{resource_id}" for resource_id, resource in project_resources.items()
+            if resource.get("required") is True
+        }
+        validation_inputs = validation_stage.get("inputs")
+        if (
+            not isinstance(validation_inputs, list)
+            or any(not isinstance(item, str) for item in validation_inputs)
+            or len(validation_inputs) != len(required_validation_inputs)
+            or set(validation_inputs) != required_validation_inputs
+        ):
+            errors.append("productive scene profile Stage 01 inputs must contain pipeline-config, storyboard, and all required resources only")
+
+        for stage_id in (TTS_NARRATION_STAGE_ID, LEGACY_NARRATION_STAGE_ID,
+                         "02-blender-scenes", "04-remotion-compose", "05-ffmpeg-finalize", "06-quality-control"):
+            stage = by_id.get(stage_id)
+            if stage is not None and stage_id != "01-validate-project" and stage.get("adapter_status") != "pending":
+                errors.append(f"productive scene profile requires {stage_id}.adapter_status to remain pending")
+
     for required_id in REQUIRED_STAGE_IDS:
         if required_id not in by_id:
             errors.append(f"missing required pipeline stage: {required_id}")
@@ -1445,6 +1524,88 @@ def _is_productive_tts_config(config):
     )
 
 
+def _intends_productive_scenes_config(config):
+    """Detect a Blender profile attempt even when one of its contract markers is wrong or missing."""
+    project = config.get("project") if isinstance(config, dict) else None
+    resources = project.get("resources", []) if isinstance(project, dict) else []
+    stages = config.get("stages", []) if isinstance(config, dict) else []
+    stage02 = next(
+        (item for item in stages if isinstance(item, dict) and item.get("id") == "02-blender-scenes"),
+        None,
+    ) if isinstance(stages, list) else None
+    if not isinstance(stage02, dict):
+        return False
+    profile = config.get("profile") if isinstance(config, dict) else None
+    has_scene_timeline = isinstance(profile, dict) and profile.get("fps") == 12
+    has_scene_timeline = has_scene_timeline or any(
+        isinstance(resource, dict) and resource.get("kind") == "blender-scene-spec"
+        for resource in resources
+    ) if isinstance(resources, list) else has_scene_timeline
+    if stage02.get("adapter_status") == "implemented" and has_scene_timeline:
+        return True
+    if isinstance(resources, list) and any(
+        isinstance(resource, dict)
+        and (resource.get("kind") == "blender-scene-spec" or resource.get("id") == "scene-spec")
+        for resource in resources
+    ):
+        return True
+    outputs = stage02.get("outputs", [])
+    has_scene_spec_input = isinstance(stage02.get("inputs"), list) and "resource-scene-spec" in stage02["inputs"]
+    has_scene_package = isinstance(outputs, list) and any(
+        isinstance(output, dict) and output.get("id") == "scene-package"
+        and isinstance(output.get("path"), str)
+        and PurePosixPath(output["path"]).suffix.lower() == ".zip"
+        for output in outputs
+    )
+    return has_scene_spec_input or has_scene_package
+
+
+def _is_productive_scenes_config(config):
+    """Return whether a scene-profile declaration matches the 5B.1 eligibility signature."""
+    project = config.get("project") if isinstance(config, dict) else None
+    resources = project.get("resources", []) if isinstance(project, dict) else []
+    stages = config.get("stages", []) if isinstance(config, dict) else []
+    if not isinstance(resources, list) or not isinstance(stages, list) or not _intends_productive_scenes_config(config):
+        return False
+    by_id = {stage.get("id"): stage for stage in stages if isinstance(stage, dict)}
+    stage01, stage02 = by_id.get("01-validate-project"), by_id.get("02-blender-scenes")
+    specs = [item for item in resources if isinstance(item, dict) and item.get("kind") == "blender-scene-spec"]
+    if len(specs) != 1 or specs[0].get("required") is not True or not isinstance(stage01, dict) or not isinstance(stage02, dict):
+        return False
+    spec_input = f"resource-{specs[0].get('id')}"
+    required_inputs = {"pipeline-config", "storyboard"} | {
+        f"resource-{item.get('id')}" for item in resources if isinstance(item, dict) and item.get("required") is True
+    }
+    scene_inputs = stage02.get("inputs")
+    validation_inputs = stage01.get("inputs")
+    outputs = stage02.get("outputs")
+    if (
+        stage01.get("adapter") != "builtin-validation" or stage01.get("adapter_status") != "implemented"
+        or stage01.get("depends_on") != [] or not isinstance(validation_inputs, list)
+        or any(not isinstance(item, str) for item in validation_inputs)
+        or set(validation_inputs) != required_inputs or len(validation_inputs) != len(required_inputs)
+        or not isinstance(stage01.get("outputs"), list)
+        or [item.get("id") for item in stage01["outputs"] if isinstance(item, dict)] != ["validated-plan"]
+        or stage02.get("adapter") != "blender-scenes" or stage02.get("adapter_status") != "pending"
+        or stage02.get("depends_on") != ["01-validate-project"]
+        or not isinstance(scene_inputs, list)
+        or any(not isinstance(item, str) for item in scene_inputs)
+        or set(scene_inputs) != {"storyboard", "validated-plan", spec_input}
+        or len(scene_inputs) != 3 or stage02.get("tools") != ["blender"]
+        or not isinstance(outputs, list) or len(outputs) != 1 or not isinstance(outputs[0], dict)
+        or outputs[0].get("id") != "scene-package"
+        or not isinstance(outputs[0].get("path"), str) or PurePosixPath(outputs[0]["path"]).suffix.lower() != ".zip"
+    ):
+        return False
+    profile = config.get("profile")
+    if not isinstance(profile, dict) or (profile.get("width"), profile.get("height"), profile.get("fps")) != (540, 960, 12):
+        return False
+    return all(
+        stage_id == "01-validate-project" or stage.get("adapter_status") == "pending"
+        for stage_id, stage in by_id.items()
+    )
+
+
 def _productive_paths(root, stage):
     return {
         output["id"]: root.joinpath(*PurePosixPath(output["path"]).parts)
@@ -2116,14 +2277,17 @@ def validate_manifest(manifest, config, config_path, manifest_path):
                 calculated = stage_fingerprint(config, stage, input_hashes, tool_versions)
                 if calculated != declared_stage_fingerprint:
                     errors.append(f"{label}.stage_fingerprint is stale for current config, inputs, or tool versions")
-    if _is_productive_tts_config(config):
-        visual_stage_ids = {
-            "02-blender-scenes", "04-remotion-compose", "05-ffmpeg-finalize", "06-quality-control",
-        }
-        for stage_id in visual_stage_ids:
+    productive_tts = _is_productive_tts_config(config)
+    productive_scenes = _is_productive_scenes_config(config)
+    if productive_tts or productive_scenes:
+        pending_stage_ids = {"02-blender-scenes", "04-remotion-compose", "05-ffmpeg-finalize", "06-quality-control"}
+        if productive_scenes:
+            pending_stage_ids.update(NARRATION_STAGE_IDS.intersection(configured))
+        for stage_id in pending_stage_ids:
             entry = stage_entries.get(stage_id)
             if isinstance(entry, dict) and entry.get("status") != "pending":
-                errors.append(f"manifest.stages.{stage_id} must remain pending in the productive TTS profile")
+                profile_name = "productive TTS" if productive_tts else "productive scenes"
+                errors.append(f"manifest.stages.{stage_id} must remain pending in the {profile_name} profile")
 
         validation_entry = stage_entries.get("01-validate-project")
         if isinstance(validation_entry, dict) and validation_entry.get("status") == "completed":
@@ -2241,6 +2405,18 @@ def _print_plan(config, waves):
         print("Production adapters are not executable; the TTS contract is declarative only.")
 
 
+def run_productive_scenes(config_path, *, blender_path):
+    """Validate the future scenes CLI contract without executing or publishing anything."""
+    config, errors, _, _ = load_and_validate_config(config_path)
+    if errors:
+        raise ValueError("invalid productive scenes profile: " + "; ".join(errors))
+    if not _is_productive_scenes_config(config):
+        raise ValueError("run-productive-scenes requires the productive Stage 01 + Stage 02 profile")
+    if not Path(blender_path).is_absolute():
+        raise ValueError("--blender must be an absolute path")
+    raise ValueError("productive Blender scenes adapter is not available in this increment")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -2275,6 +2451,11 @@ def main(argv=None):
     productive_parser.add_argument("--python", required=True, help="absolute path to the trusted Python interpreter")
     productive_parser.add_argument("--model", required=True, help="absolute path to the local Kokoro ONNX model")
     productive_parser.add_argument("--voices", required=True, help="absolute path to the local Kokoro voices file")
+    scenes_parser = commands.add_parser(
+        "run-productive-scenes", help="run productive Blender scene generation when the adapter is available"
+    )
+    scenes_parser.add_argument("config", help="pipeline JSON file; its directory is the project root")
+    scenes_parser.add_argument("--blender", required=True, help="absolute path to the trusted Blender executable")
     args = parser.parse_args(argv)
 
     if args.command == "validate-manifest":
@@ -2326,6 +2507,15 @@ def main(argv=None):
             result = run_productive_tts(
                 args.config, python_path=args.python, model_path=args.model, voices_path=args.voices,
             )
+        except (OSError, ValueError) as exc:
+            print(json.dumps({"error": str(exc), "simulation": False}, ensure_ascii=False, sort_keys=True))
+            return 1
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
+        return 0
+
+    if args.command == "run-productive-scenes":
+        try:
+            result = run_productive_scenes(args.config, blender_path=args.blender)
         except (OSError, ValueError) as exc:
             print(json.dumps({"error": str(exc), "simulation": False}, ensure_ascii=False, sort_keys=True))
             return 1
