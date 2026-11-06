@@ -150,8 +150,12 @@ El runner productivo actual solo cubre Stage 01/03 Kokoro. No existe ejecución 
 - El perfil Stage 01 + Stage 02 valida el DAG completo, mantiene Stage 03/04/05/06 pending y verifica semánticamente `validated-plan`.
 - El CLI `run-productive-scenes CONFIG --blender ABSOLUTE_PATH` falla de forma controlada mientras el adaptador real no está disponible; no invoca Blender ni escribe estado de ejecución.
 
-## v0.10 — Phase 5B.2: Strict Blender Scene Specification v1 (en desarrollo)
+## v0.10 — Phase 5B.2: Strict Blender Scene Specification v1 (completada)
 
-- Se implementa un parser UTF-8 estricto, limitado a 64 KiB, y validación cerrada del contrato `blender-scene-spec` v1 con tipos, rangos, IDs, referencias, timeline y movimiento de cámara.
-- Se incluye un ejemplo coherente de pipeline, storyboard y scene spec; los cambios al recurso afectan la semántica del `validated-plan` por los fingerprints v1 existentes.
-- Stage 02 permanece pending. No se implementan worker, preflight Blender, render, decodificador PNG ni publicación ZIP en este incremento.
+- PR #17 integrado mediante merge commit `6bd1868987cd918ace261d5a734b5ca8bb49b0ad`.
+- El parser UTF-8 estricto, limitado a 64 KiB, valida el contrato cerrado `blender-scene-spec` v1: tipos, rangos, IDs, referencias, timeline y movimiento de cámara.
+- Se incluye un ejemplo coherente de pipeline, storyboard y scene spec; los cambios al recurso invalidan la semántica del `validated-plan` mediante los fingerprints v1 existentes.
+- 212 pruebas automatizadas ejecutadas localmente en Windows/Python 3.12: 209 aprobadas y 3 omitidas por permisos de symlink (`WinError 1314`). CI pasó en Ubuntu 24.04, Ubuntu 26.04 y Windows 2025.
+- Stage 02 permanece pending. No se implementaron worker, preflight Blender, render, decodificador PNG ni publicación ZIP; no se ejecutó Blender ni se generaron medios.
+
+**Criterio para Phase 5B.3:** validar la trayectoria completa de cámara entre keyframes. La interpolación lineal independiente de posición y target puede producir posiciones coincidentes o un vector de dirección inválido en frames intermedios; el worker/verificador deberá detectar y rechazar esos casos antes de renderizar.
