@@ -131,6 +131,44 @@ scene-package.zip
 
 `package.json` lista orden, intervalos semiabiertos, FPS, dimensiones y cada payload con tamaño y SHA-256. Para evitar autocontención imposible, no incluye hashes de sí mismo ni de `provenance.json`; el SHA-256 externo del ZIP en el manifiesto v1 cubre ambos. `provenance.json` informa `record_type: productive-local-blender-scenes`, versión de provenance, IDs de corrida/proyecto/etapa, versión observada (`bpy.app.version` y `version_string`), SHA-256 del ejecutable/worker, inputs/fingerprints, motor/dispositivo/configuración efectiva, dimensiones/FPS/frames, semilla y tiempos observados. No incluye rutas absolutas/timestamps de máquina como inputs de fingerprints.
 
+#### Contratos JSON cerrados para scene-package v1 (Phase 5B.5A)
+
+Ambos documentos son objetos UTF-8 JSON, máximo 1 MiB cada uno. Se rechazan BOM, claves repetidas en cualquier profundidad, constantes JSON no estándar (`NaN`/`Infinity`), campos desconocidos o faltantes y tipos coercibles (en particular, boolean no equivale a integer). Los hashes son SHA-256 hexadecimal minúscula de 64 caracteres. IDs de proyecto/escena y de recursos son slugs ASCII `[a-z0-9]+(?:-[a-z0-9]+)*`; el `run_id` es UUID canónico en minúsculas. No se permiten extensiones ni defaults implícitos.
+
+`package.json` tiene exactamente estas claves de nivel raíz:
+
+| Campo | Tipo y valor/rango | Relación |
+|---|---|---|
+| `package_version` | integer `1` | Versión de este índice; independiente de `pipeline_version` y `manifest_version`. |
+| `record_type` | string `blender-scene-package` | Discriminador fijo. |
+| `project_id` | slug ASCII | Debe coincidir con provenance y contexto externo, si se proporciona. |
+| `stage_id` | string `02-blender-scenes` | Stage propietario único del artefacto. |
+| `scene_id` | slug ASCII | Debe coincidir con provenance y ser el único segmento variable de las rutas. |
+| `timeline` | objeto exacto `{source_start_frame, source_end_frame_exclusive, fps_num, fps_den, frame_count}`; todos integers | Valores fijados a `0`, `24`, `12`, `1`, `24`, respectivamente; rango semiabierto `[0,24)`, duración exacta 2 s. |
+| `render` | objeto exacto `{width, height, image_format}` | `540`, `960`, `PNG_RGB8_SRGB`. Cada PNG debe cumplir además el decoder RGB8 completo. |
+| `payloads` | array de 25 objetos discriminados por `role` | Primero una escena Blender y luego los frames 0–23 en orden de número de frame; no contiene los dos JSON. |
+
+Cada payload `role: scene-blend` tiene exactamente `{role, path, size_bytes, sha256}`, ruta `scenes/<scene_id>/scene.blend`, `size_bytes` integer en `[12, 536870912]` y `sha256` válido. Cada payload `role: frame-png` tiene exactamente `{role, path, source_frame, size_bytes, sha256}`, `source_frame` integer `0..23`, ruta `scenes/<scene_id>/frames/frame-<source_frame:06d>.png`, `size_bytes` integer `1..33554432` y hash válido. El inventario ZIP son esos 25 payloads más `package.json` y `provenance.json`: exactamente 27 miembros.
+
+`provenance.json` tiene exactamente estas claves de nivel raíz:
+
+| Campo | Tipo y valor/rango | Relación |
+|---|---|---|
+| `provenance_version` | integer `1` | Versión de este recibo. |
+| `record_type` | string `productive-local-blender-scenes` | Discriminador fijo; es una declaración del padre y no prueba ejecución por sí sola. |
+| `run_id` | UUID canónico | Debe coincidir con la corrida del manifiesto/contexto proporcionado. |
+| `project_id`, `stage_id`, `scene_id` | slug/string | Deben igualar los valores del índice; `stage_id` es `02-blender-scenes`. |
+| `runtime` | objeto exacto `{blender_version, blender_version_string, blender_version_cycle, blender_executable_sha256, worker_version, worker_sha256}` | Tupla integer `[5,2,patch]` con `patch` entre 0 y 99; string normalizado `5.2.<patch>`; cycle `release`; SHA válidos; `worker_version` integer `1`. No se acepta versión de runtime inferida del JSON de configuración. |
+| `inputs` | objeto exacto `{validated_plan_sha256, stage_01_fingerprint, stage_02_fingerprint, input_hashes}` | Los tres primeros valores son hashes válidos. `input_hashes` es array sin duplicados, ordenado por `id`, de objetos exactos `{id, sha256}`; incluye `storyboard`, `validated-plan` y exactamente el recurso `resource-<id>` de tipo scene-spec usado por Stage 02. No contiene rutas. |
+| `render` | objeto exacto `{policy_id, engine, device, width, height, fps_num, fps_den, source_start_frame, source_end_frame_exclusive, samples, threads, seed, denoising, image_format}` | Política `blender-scene-policy-v1`; `CYCLES`/`CPU`; `540`×`960`; `12/1`; `[0,24)`; 8 samples; 2 threads; seed integer `0..2147483647`; denoising `false`; `PNG_RGB8_SRGB`. Debe coincidir con `package.json` y el perfil. |
+| `observed` | objeto exacto `{frames, minimum_camera_target_distance_m, render_seconds, worker_seconds}` | `frames` es exactamente `[0,...,23]`; las métricas son números finitos, no booleanos, no negativos; distancia mínima `>0.01`. Son valores observados que declara el proceso padre a partir de su recibo worker. |
+
+La API read-only `validate_scene_package(stream, expected_context=None, limits=DEFAULT_LIMITS)` recibe un stream binario seekable posicionado en cero, no lo cierra ni altera su posición. `ScenePackageContext` lo crea el llamador a partir del proyecto/storyboard/scene-spec/validated-plan, runtime preflight y manifiesto ya validados; contiene `project_id`, `scene_id`, `run_id`, `stage_01_fingerprint`, `stage_02_fingerprint`, `input_hashes` con los SHA-256 actuales, `runtime` con versión/worker/ejecutable observados y sus hashes, `expected_render_seed` entero `0..2147483647` obtenido del Scene Spec v1 validado fuera del ZIP, y `manifest_scene_package_sha256`. El validador compara todos esos valores con índice, provenance y SHA-256 exterior real del ZIP, incluida la igualdad exacta entre `expected_render_seed` y `provenance.render.seed`. Los `limits` inyectables son para bajar presupuestos en tests; nunca pueden superar los límites de seguridad de producción. El llamador conserva la responsabilidad de comprobar que el manifiesto v1 declara Stage 01/02 como `completed`, que el artefacto corresponde a `scene-package` y que sus dependencias/configuración/DAG son semánticamente actuales. Sin contexto externo, el resultado certifica integridad estructural y consistencia interna únicamente; nunca afirma autenticidad, que Blender ejecutó, que abrió el `.blend` ni que el manifiesto valida.
+
+El ZIP de MVP es classic single-disk ZIP sin ZIP64, preámbulo, comentario, encryption, data descriptor ni campos extra. Solo acepta compresión STORE/DEFLATE, flags cero y entradas de archivos regulares; el sistema creador puede ser DOS/Windows o Unix, pero Unix file type debe ser regular o no declarado, y los atributos DOS de volumen, directorio, dispositivo y reparse point se rechazan. El central directory y cada local header deben concordar en nombre, método, flags, CRC, tamaños y offsets; no hay rangos de miembros solapados ni huecos/padding entre registros de miembros. Los nombres son ASCII POSIX allowlisted, únicos con comparación case-insensitive. Fechas DOS deben tener componentes válidos, pero no aportan provenance ni identidad. Antes de construir `ZipFile`, se comprueba el EOCD fijo al final, su cuenta exacta de 27 y se prelee el central directory con presupuesto derivado de 27 registros y el máximo nombre ZIP de 65,535 bytes; no se permite que un directorio central con millones de entradas haga que `zipfile` materialice metadata sin límite.
+
+Los límites son ZIP exterior 512 MiB, 27 miembros, expansión total 1 GiB, razón por miembro como máximo 100, JSON 1 MiB, `.blend` 512 MiB y PNG 32 MiB. Se validan antes de abrir el reader y nuevamente durante la lectura de cada miembro. Cada miembro se consume a EOF en bloques acotados; `zipfile` comprueba su CRC y el padre compara además bytes expandidos reales, SHA-256 e inventario con el índice. JSON pequeños se almacenan dentro del límite para parseo estricto; los demás payloads no se materializan. PNG se pasa como stream directamente al decoder 5B.4. `.blend` se consume completo/hash y se comprueba solo la cabecera de 12 bytes `BLENDER`, clase de puntero/endian válidas y versión de archivo 502; eso no garantiza que Blender pueda abrirlo.
+
 ### Índice temporal y numeración
 
 Cada escena lleva `source_start_frame`, `source_end_frame_exclusive`, `fps_num: 12`, `fps_den: 1` y `frame_count: end-start`. Para el MVP: `[0,24)`, 24 frames y duración exacta 2 s. El PNG `frame-000000.png` corresponde al frame fuente 0 y tiempo `0/12`; `frame-000023.png` al frame 23 y tiempo `23/12` s. Los frames representan muestras de tiempo dentro del intervalo total semiabierto `[0,2 s)`; no se crea un frame 24 ni se incluye un duplicado del límite final.
