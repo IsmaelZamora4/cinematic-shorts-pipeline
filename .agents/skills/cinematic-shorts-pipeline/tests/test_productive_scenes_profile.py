@@ -2,7 +2,9 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 import shutil
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -108,6 +110,17 @@ class ProductiveScenesProfileTests(unittest.TestCase):
     def errors(self):
         _, errors, _, _ = pipeline.load_and_validate_config(self.config_path)
         return errors
+
+    def fake_blender_executable(self):
+        path = self.root / ("blender.exe" if os.name == "nt" else "blender")
+        path.write_bytes(b"fake Blender executable")
+        if os.name != "nt":
+            path.chmod(path.stat().st_mode | stat.S_IXUSR)
+        return path.resolve()
+
+    @staticmethod
+    def successful_blender_version_probe(*args, **kwargs):
+        return subprocess.CompletedProcess(args[0], 0, stdout="Blender 5.2.3\n", stderr="")
 
     def test_accepts_stage_01_02_profile_and_keeps_following_stages_pending(self):
         loaded, errors, warnings, waves = pipeline.load_and_validate_config(self.config_path)
@@ -343,17 +356,25 @@ class ProductiveScenesProfileTests(unittest.TestCase):
 
     def test_cli_is_a_controlled_unavailable_failure_without_writes_or_processes(self):
         before = sorted(path.relative_to(self.root).as_posix() for path in self.root.rglob("*"))
+        blender_path = self.fake_blender_executable()
+        before = sorted(path.relative_to(self.root).as_posix() for path in self.root.rglob("*"))
         output = io.StringIO()
-        with mock.patch.object(subprocess, "run", side_effect=AssertionError("Blender must not start")), contextlib.redirect_stdout(output):
-            result = pipeline.main(["run-productive-scenes", str(self.config_path), "--blender", str((self.root / "blender.exe").resolve())])
+        with (
+            mock.patch.object(pipeline, "_run_blender_version_probe", side_effect=self.successful_blender_version_probe) as probe,
+            mock.patch.object(pipeline, "_run_blender_scenes_worker", side_effect=AssertionError("worker must not start")),
+            contextlib.redirect_stdout(output),
+        ):
+            result = pipeline.main(["run-productive-scenes", str(self.config_path), "--blender", str(blender_path)])
         after = sorted(path.relative_to(self.root).as_posix() for path in self.root.rglob("*"))
         self.assertEqual(1, result)
-        self.assertIn("adapter is not available", output.getvalue())
+        self.assertIn("execution is not available", output.getvalue())
+        self.assertIn("Blender 5.2.3 preflight passed", output.getvalue())
+        self.assertEqual(1, probe.call_count)
         self.assertEqual(before, after)
 
     def test_cli_rejects_relative_blender_path_without_starting_anything(self):
         output = io.StringIO()
-        with mock.patch.object(subprocess, "run", side_effect=AssertionError("Blender must not start")), contextlib.redirect_stdout(output):
+        with mock.patch.object(pipeline, "_run_blender_version_probe", side_effect=AssertionError("Blender must not start")), contextlib.redirect_stdout(output):
             result = pipeline.main(["run-productive-scenes", str(self.config_path), "--blender", "blender"])
         self.assertEqual(1, result)
         self.assertIn("must be an absolute path", output.getvalue())
@@ -361,12 +382,13 @@ class ProductiveScenesProfileTests(unittest.TestCase):
     def test_cli_rejects_inconsistent_profile_before_adapter_unavailable_response(self):
         next(stage for stage in self.config["stages"] if stage["id"] == "02-blender-scenes")["adapter"] = "changed-adapter"
         self.write_config()
+        blender_path = self.fake_blender_executable()
         output = io.StringIO()
-        with mock.patch.object(subprocess, "run", side_effect=AssertionError("Blender must not start")), contextlib.redirect_stdout(output):
-            result = pipeline.main(["run-productive-scenes", str(self.config_path), "--blender", str((self.root / "blender.exe").resolve())])
+        with mock.patch.object(pipeline, "_run_blender_version_probe", side_effect=AssertionError("Blender must not start")), contextlib.redirect_stdout(output):
+            result = pipeline.main(["run-productive-scenes", str(self.config_path), "--blender", str(blender_path)])
         self.assertEqual(1, result)
         self.assertIn("invalid productive scenes profile", output.getvalue())
-        self.assertNotIn("adapter is not available", output.getvalue())
+        self.assertNotIn("execution is not available", output.getvalue())
 
 
 if __name__ == "__main__":

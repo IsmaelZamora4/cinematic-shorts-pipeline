@@ -7,10 +7,13 @@ import json
 import math
 import os
 import re
+import signal
 import stat
 import struct
 import subprocess
 import sys
+import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -56,6 +59,13 @@ MAX_KOKORO_PROVENANCE_BYTES = 64 * 1024
 MAX_VALIDATED_PLAN_BYTES = 1024 * 1024
 MAX_PRODUCTIVE_STORYBOARD_BYTES = 4 * 1024 * 1024
 MAX_BLENDER_SCENE_SPEC_BYTES = 64 * 1024
+MAX_BLENDER_PREFLIGHT_OUTPUT_BYTES = 16 * 1024
+MAX_BLENDER_WORKER_REQUEST_BYTES = 128 * 1024
+MAX_BLENDER_WORKER_RESPONSE_BYTES = 64 * 1024
+BLENDER_PREFLIGHT_TIMEOUT_SECONDS = 15
+BLENDER_WORKER_TIMEOUT_SECONDS = 30 * 60
+BLENDER_TERMINATION_GRACE_SECONDS = 3
+BLENDER_VERSION_PATTERN = re.compile(r"(?m)^Blender\s+(\d+)\.(\d+)\.(\d+)(?:\s|$)")
 KOKORO_TIMEOUT_SECONDS = 300
 TTS_SAMPLE_RATES = {16000, 22050, 24000, 32000, 44100, 48000}
 TTS_SAMPLE_FORMATS = {"pcm_s16le", "pcm_s24le", "pcm_f32le"}
@@ -1428,6 +1438,479 @@ def _hash_local_runtime_file(value, label, maximum_size):
     return path, digest.hexdigest(), entry.st_size
 
 
+def _parse_blender_version_output(stdout, stderr=""):
+    parts = []
+    for value in (stdout, stderr):
+        if isinstance(value, bytes):
+            parts.append(value.decode("utf-8", errors="replace"))
+        elif isinstance(value, str):
+            parts.append(value)
+        elif value is not None:
+            raise ValueError("Blender version probe returned an unsupported output type")
+    encoded = "\n".join(parts).encode("utf-8")
+    if len(encoded) > MAX_BLENDER_PREFLIGHT_OUTPUT_BYTES:
+        raise ValueError(
+            f"Blender version probe output exceeds {MAX_BLENDER_PREFLIGHT_OUTPUT_BYTES} bytes"
+        )
+    matches = list(BLENDER_VERSION_PATTERN.finditer("\n".join(parts)))
+    if len(matches) != 1:
+        raise ValueError("Blender version output must contain exactly one Blender x.y.z version")
+    version = tuple(int(component) for component in matches[0].groups())
+    version_line = next(line for line in "\n".join(parts).splitlines() if BLENDER_VERSION_PATTERN.match(line))
+    suffix = version_line[BLENDER_VERSION_PATTERN.match(version_line).end():].strip()
+    if suffix and suffix.casefold() != "lts":
+        raise ValueError("Blender prerelease or development builds are unsupported")
+    if version[0:2] != (5, 2):
+        raise ValueError(f"Blender {version[0]}.{version[1]}.{version[2]} is unsupported; expected Blender 5.2.x")
+    return version
+
+
+def _run_blender_version_probe(command, cwd):
+    """Capture at most the allowed version output while supervising the process."""
+    options = {
+        "stdin": subprocess.DEVNULL, "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT,
+        "shell": False, "cwd": cwd,
+    }
+    if os.name == "nt":
+        options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+    else:
+        options["start_new_session"] = True
+    process = subprocess.Popen(command, **options)
+    job = None
+    reader = None
+    captured = bytearray()
+    errors = []
+    oversized = threading.Event()
+    succeeded = False
+
+    def read_output():
+        try:
+            while True:
+                chunk = process.stdout.read1(4096)
+                if not chunk:
+                    return
+                remaining = MAX_BLENDER_PREFLIGHT_OUTPUT_BYTES - len(captured)
+                captured.extend(chunk[:max(remaining, 0)])
+                if len(chunk) > remaining:
+                    oversized.set()
+                    return
+        except (OSError, ValueError) as exc:
+            errors.append(exc)
+
+    try:
+        if os.name == "nt":
+            job = _attach_windows_job(process)
+        deadline = time.monotonic() + BLENDER_PREFLIGHT_TIMEOUT_SECONDS
+        reader = threading.Thread(target=read_output, daemon=True)
+        reader.start()
+        reader.join(max(0, deadline - time.monotonic()))
+        if reader.is_alive():
+            raise ValueError("Blender version probe timed out")
+        if oversized.is_set():
+            raise ValueError(f"Blender version probe output exceeds {MAX_BLENDER_PREFLIGHT_OUTPUT_BYTES} bytes")
+        if errors:
+            raise ValueError("Blender version probe output could not be read") from errors[0]
+        try:
+            returncode = process.wait(timeout=max(0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired as exc:
+            raise ValueError("Blender version probe timed out") from exc
+        succeeded = True
+        return subprocess.CompletedProcess(command, returncode, stdout=bytes(captured), stderr=b"")
+    finally:
+        if not succeeded:
+            _terminate_blender_process_tree(process, job)
+        if job is not None:
+            job.close()
+        if reader is not None:
+            reader.join(timeout=BLENDER_TERMINATION_GRACE_SECONDS)
+        process.stdout.close()
+
+
+def _preflight_blender_runtime(blender_path):
+    """Check one explicit local Blender executable and observe its actual 5.2.x version."""
+    if not isinstance(blender_path, (str, os.PathLike)) or not str(blender_path).strip():
+        raise ValueError("--blender path must be provided explicitly")
+    executable = Path(blender_path)
+    if not executable.is_absolute():
+        raise ValueError("--blender must be an absolute path")
+    executable, digest, size_bytes = _hash_local_runtime_file(
+        executable, "Blender executable", 1024 * 1024 * 1024,
+    )
+    if os.name == "nt":
+        if executable.suffix.lower() != ".exe":
+            raise ValueError("Blender executable must be a regular .exe file on Windows")
+    elif not os.access(executable, os.X_OK):
+        raise ValueError("Blender executable does not have execution permission")
+
+    command = [str(executable), "--version"]
+    completed = _run_blender_version_probe(command, executable.parent)
+    if completed.returncode != 0:
+        raise ValueError(f"Blender version probe failed with exit code {completed.returncode}")
+    version = _parse_blender_version_output(completed.stdout, completed.stderr)
+    return {
+        "path": str(executable),
+        "version": version,
+        "version_string": ".".join(str(component) for component in version),
+        "sha256": digest,
+        "size_bytes": size_bytes,
+    }
+
+
+def _blender_worker_path():
+    worker = Path(__file__).with_name("blender-scenes-worker.py")
+    worker, digest, size_bytes = _hash_local_runtime_file(worker, "Blender scenes worker", 4 * 1024 * 1024)
+    return worker, digest, size_bytes
+
+
+def _blender_worker_command(runtime, request_path):
+    version = runtime.get("version") if isinstance(runtime, dict) else None
+    if not isinstance(version, tuple) or version[:2] != (5, 2) or len(version) != 3:
+        raise ValueError("Blender worker requires a successful 5.2.x runtime preflight")
+    executable = runtime.get("path")
+    if not isinstance(executable, str) or not Path(executable).is_absolute():
+        raise ValueError("Blender worker requires an absolute preflighted executable path")
+    request_path = Path(request_path)
+    if not request_path.is_absolute():
+        raise ValueError("Blender worker request path must be absolute")
+    worker, _, _ = _blender_worker_path()
+    return [
+        executable,
+        "--background",
+        "--factory-startup",
+        "--disable-autoexec",
+        "--python-exit-code", "1",
+        "--threads", "2",
+        "--python", str(worker),
+        "--", "--request", str(request_path),
+    ]
+
+
+def _attach_windows_job(process):
+    """Place Blender and descendants in a kill-on-close Windows Job Object."""
+    import ctypes
+    from ctypes import wintypes
+
+    class IoCounters(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_ulonglong) for name in (
+            "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+            "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
+        )]
+
+    class BasicLimitInformation(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_longlong),
+            ("PerJobUserTimeLimit", ctypes.c_longlong),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class ExtendedLimitInformation(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", BasicLimitInformation),
+            ("IoInfo", IoCounters),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateJobObjectW.argtypes = (ctypes.c_void_p, wintypes.LPCWSTR)
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.SetInformationJobObject.argtypes = (
+        wintypes.HANDLE, wintypes.INT, ctypes.c_void_p, wintypes.DWORD,
+    )
+    kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+    kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    kernel32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
+    kernel32.TerminateJobObject.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    job = kernel32.CreateJobObjectW(None, None)
+    if not job:
+        raise OSError(ctypes.get_last_error(), "CreateJobObjectW failed")
+    try:
+        info = ExtendedLimitInformation()
+        info.BasicLimitInformation.LimitFlags = 0x00002000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not kernel32.SetInformationJobObject(
+            job, 9, ctypes.byref(info), ctypes.sizeof(info),
+        ):
+            raise OSError(ctypes.get_last_error(), "SetInformationJobObject failed")
+        if not kernel32.AssignProcessToJobObject(job, wintypes.HANDLE(process._handle)):
+            raise OSError(ctypes.get_last_error(), "AssignProcessToJobObject failed")
+    except Exception:
+        kernel32.CloseHandle(job)
+        raise
+
+    class Job:
+        def terminate(self):
+            if not kernel32.TerminateJobObject(job, 1):
+                raise OSError(ctypes.get_last_error(), "TerminateJobObject failed")
+
+        def close(self):
+            if job:
+                kernel32.CloseHandle(job)
+
+    return Job()
+
+
+def _process_group_exists(process_id):
+    try:
+        os.killpg(process_id, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _terminate_blender_process_tree(process, windows_job=None):
+    if os.name == "nt":
+        if windows_job is None:
+            process.kill()
+        else:
+            windows_job.terminate()
+        process.wait()
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    deadline = time.monotonic() + BLENDER_TERMINATION_GRACE_SECONDS
+    while time.monotonic() < deadline and _process_group_exists(process.pid):
+        time.sleep(0.05)
+    if _process_group_exists(process.pid):
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    process.wait()
+
+
+def _run_blender_process(command, cwd):
+    """Run the fixed Blender command and terminate its whole process tree on stop."""
+    environment = os.environ.copy()
+    for name in ("PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP"):
+        environment.pop(name, None)
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    options = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "shell": False,
+        "cwd": cwd,
+        "env": environment,
+    }
+    if os.name == "nt":
+        options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+    else:
+        options["start_new_session"] = True
+    process = subprocess.Popen(command, **options)
+    windows_job = None
+    try:
+        if os.name == "nt":
+            try:
+                windows_job = _attach_windows_job(process)
+            except Exception:
+                _terminate_blender_process_tree(process)
+                raise
+        try:
+            returncode = process.wait(timeout=BLENDER_WORKER_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as exc:
+            _terminate_blender_process_tree(process, windows_job)
+            raise ValueError(
+                f"Blender worker exceeded {BLENDER_WORKER_TIMEOUT_SECONDS} second timeout; no retry was attempted"
+            ) from exc
+        except KeyboardInterrupt as exc:
+            _terminate_blender_process_tree(process, windows_job)
+            raise ValueError("Blender worker was cancelled; no retry was attempted") from exc
+        if returncode != 0:
+            raise ValueError(f"Blender worker failed with exit code {returncode}; no retry was attempted")
+    finally:
+        if windows_job is not None:
+            windows_job.close()
+
+
+def _read_bounded_regular_file(path, maximum_size, label):
+    path = Path(path)
+    before = _inspect_path(path)
+    if before is None or not stat.S_ISREG(before.st_mode):
+        raise ValueError(f"{label} must be a regular non-link file")
+    if before.st_size > maximum_size:
+        raise ValueError(f"{label} exceeds maximum size of {maximum_size} bytes")
+    identity = _file_identity(before)
+    with path.open("rb") as stream:
+        opened = os.fstat(stream.fileno())
+        if identity is not None and _file_identity(opened) != identity:
+            raise ValueError(f"{label} changed while opening")
+        payload = stream.read(maximum_size + 1)
+    after = _inspect_path(path)
+    if after is None or (identity is not None and _file_identity(after) != identity):
+        raise ValueError(f"{label} changed while reading")
+    if len(payload) > maximum_size:
+        raise ValueError(f"{label} exceeds maximum size of {maximum_size} bytes")
+    return payload
+
+
+def _create_blender_staging(project_root):
+    parent = _ensure_project_output_directory(project_root, (".pipeline", "work", "blender-scenes"))
+    for _ in range(3):
+        run_dir = parent / f"run-{uuid.uuid4().hex}"
+        try:
+            os.mkdir(run_dir, 0o700)
+        except FileExistsError:
+            continue
+        entry = _inspect_path(run_dir)
+        if entry is None or not stat.S_ISDIR(entry.st_mode):
+            raise ValueError("could not establish an exclusive Blender staging directory")
+        return run_dir
+    raise ValueError("could not allocate an exclusive Blender staging directory")
+
+
+def _validate_blender_worker_response(data, runtime, project_id, scene_id, staging_root):
+    try:
+        response = STORYBOARD_VALIDATOR.parse_json(data.decode("utf-8", errors="strict"))
+    except (UnicodeError, ValueError) as exc:
+        raise ValueError("Blender worker response is not strict valid JSON") from exc
+    fields = {
+        "record_type", "worker_version", "blender_version", "blender_version_string",
+        "project_id", "scene_id", "frames", "outputs", "minimum_camera_target_distance_m",
+        "render_seconds", "worker_seconds",
+    }
+    if not isinstance(response, dict) or set(response) != fields:
+        raise ValueError("Blender worker response has missing or unknown fields")
+    if (
+        response.get("record_type") != "blender-scenes-worker-result"
+        or type(response.get("worker_version")) is not int or response["worker_version"] != 1
+        or response.get("blender_version") != list(runtime["version"])
+        or response.get("blender_version_string") != runtime["version_string"]
+        or response.get("project_id") != project_id
+        or response.get("scene_id") != scene_id
+        or response.get("frames") != list(range(24))
+    ):
+        raise ValueError("Blender worker response does not match the preflighted request")
+    expected_outputs = [f"scenes/{scene_id}/scene.blend"] + [
+        f"scenes/{scene_id}/frames/frame-{frame:06d}.png" for frame in range(24)
+    ]
+    if response.get("outputs") != expected_outputs:
+        raise ValueError("Blender worker response does not declare the exact expected staging outputs")
+    for field in ("minimum_camera_target_distance_m", "render_seconds", "worker_seconds"):
+        value = response.get(field)
+        if (
+            not isinstance(value, (int, float)) or isinstance(value, bool)
+            or not math.isfinite(value) or value < 0
+        ):
+            raise ValueError(f"Blender worker response {field} must be a finite non-negative number")
+    if response["minimum_camera_target_distance_m"] <= 0.01:
+        raise ValueError("Blender worker response reports an invalid camera-target distance")
+    root = Path(staging_root)
+    for relative in expected_outputs:
+        path = root
+        parts = PurePosixPath(relative).parts
+        for component in parts[:-1]:
+            path /= component
+            entry = _inspect_path(path)
+            if entry is None or not stat.S_ISDIR(entry.st_mode):
+                raise ValueError(f"Blender worker output parent is absent or unsafe: {relative}")
+        path /= parts[-1]
+        entry = _inspect_path(path)
+        if entry is None or not stat.S_ISREG(entry.st_mode) or entry.st_size <= 0:
+            raise ValueError(f"Blender worker expected output is absent or invalid: {relative}")
+        maximum = 512 * 1024 * 1024 if relative.endswith(".blend") else 32 * 1024 * 1024
+        if entry.st_size > maximum:
+            raise ValueError(f"Blender worker staging output exceeds size limit: {relative}")
+    return response
+
+
+def _run_blender_scenes_worker(config_path, runtime):
+    """Prepare exclusive staging and run the fixed worker without publishing or updating a manifest."""
+    config, errors, _, _ = load_and_validate_config(config_path)
+    if errors or not _is_productive_scenes_config(config):
+        raise ValueError("Blender worker requires a valid productive Stage 01 + Stage 02 profile")
+    version = runtime.get("version") if isinstance(runtime, dict) else None
+    if not isinstance(version, tuple) or len(version) != 3 or version[:2] != (5, 2):
+        raise ValueError("Blender worker requires a successful Blender 5.2.x preflight")
+    runtime_path, runtime_hash, _ = _hash_local_runtime_file(
+        runtime.get("path"), "Blender executable", 1024 * 1024 * 1024,
+    )
+    if runtime_hash != runtime.get("sha256"):
+        raise ValueError("Blender executable changed after preflight")
+    input_hashes, _ = _productive_snapshot(config, config_path)
+    root = Path(config_path).resolve().parent
+    resource = next(
+        item for item in config["project"]["resources"] if item["kind"] == "blender-scene-spec"
+    )
+    scene_spec_path = root.joinpath(*PurePosixPath(resource["path"]).parts)
+    scene_spec_bytes = _read_bounded_regular_file(
+        scene_spec_path, MAX_BLENDER_SCENE_SPEC_BYTES, "blender-scene-spec",
+    )
+    try:
+        scene_spec = STORYBOARD_VALIDATOR.parse_json(scene_spec_bytes.decode("utf-8", errors="strict"))
+    except (UnicodeError, ValueError) as exc:
+        raise ValueError("blender-scene-spec changed to invalid JSON before worker execution") from exc
+    storyboard_path = root.joinpath(*PurePosixPath(config["project"]["storyboard"]).parts)
+    storyboard_bytes = _read_bounded_regular_file(
+        storyboard_path, MAX_PRODUCTIVE_STORYBOARD_BYTES, "storyboard",
+    )
+    storyboard = STORYBOARD_VALIDATOR.parse_json(storyboard_bytes.decode("utf-8", errors="strict"))
+    scene_spec_errors = _validate_blender_scene_spec(
+        scene_spec, config["project"]["id"], storyboard,
+    )
+    if scene_spec_errors:
+        raise ValueError(
+            "blender-scene-spec no longer matches the validated project and storyboard: "
+            + "; ".join(scene_spec_errors)
+        )
+    staging_root = _create_blender_staging(root)
+    request = {
+        "request_version": 1,
+        "project_id": config["project"]["id"],
+        "scene_spec": scene_spec,
+        "expected_blender_version": list(runtime["version"]),
+        "expected_blender_version_string": runtime["version_string"],
+        "staging_root": str(staging_root.resolve()),
+    }
+    request_bytes = (json.dumps(request, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    if len(request_bytes) > MAX_BLENDER_WORKER_REQUEST_BYTES:
+        raise ValueError("Blender worker request exceeds its maximum size")
+    request_path = staging_root / "request.json"
+    _write_exclusive_file(request_path, request_bytes, {})
+    command = _blender_worker_command(runtime, request_path)
+    worker_path, worker_hash, _ = _blender_worker_path()
+    try:
+        _run_blender_process(command, root)
+        _assert_productive_config_unchanged(config, config_path)
+        current_hashes, _ = _productive_snapshot(config, config_path)
+        if current_hashes != input_hashes:
+            raise ValueError("project inputs changed while Blender worker was running")
+        if _hash_local_runtime_file(runtime_path, "Blender executable", 1024 * 1024 * 1024)[1] != runtime_hash:
+            raise ValueError("Blender executable changed while worker was running")
+        if _hash_local_runtime_file(worker_path, "Blender scenes worker", 4 * 1024 * 1024)[1] != worker_hash:
+            raise ValueError("Blender scenes worker changed while it was running")
+        if hashlib.sha256(_read_bounded_regular_file(
+            request_path, MAX_BLENDER_WORKER_REQUEST_BYTES, "Blender worker request",
+        )).digest() != hashlib.sha256(request_bytes).digest():
+            raise ValueError("Blender worker request changed while the process was running")
+        response_path = staging_root / "response.json"
+        response_bytes = _read_bounded_regular_file(
+            response_path, MAX_BLENDER_WORKER_RESPONSE_BYTES, "Blender worker response",
+        )
+        response = _validate_blender_worker_response(
+            response_bytes, runtime, config["project"]["id"], scene_spec["scene_id"], staging_root,
+        )
+        return {"staging_root": str(staging_root), "response": response, "stage_02_status": "pending"}
+    except (OSError, ValueError) as exc:
+        if "staging_root" in str(exc):
+            raise
+        raise ValueError(f"Blender worker failed; staged files remain untrusted for manual inspection: {exc}") from exc
+
+
 def _inspect_kokoro_wav(data):
     """Verify real Kokoro WAV structure, bounds, signal, and PCM clipping."""
     if not isinstance(data, bytes) or len(data) < 44:
@@ -2632,15 +3115,17 @@ def _print_plan(config, waves):
 
 
 def run_productive_scenes(config_path, *, blender_path):
-    """Validate the future scenes CLI contract without executing or publishing anything."""
+    """Preflight explicit Blender, then fail closed until package publication is available."""
     config, errors, _, _ = load_and_validate_config(config_path)
     if errors:
         raise ValueError("invalid productive scenes profile: " + "; ".join(errors))
     if not _is_productive_scenes_config(config):
         raise ValueError("run-productive-scenes requires the productive Stage 01 + Stage 02 profile")
-    if not Path(blender_path).is_absolute():
-        raise ValueError("--blender must be an absolute path")
-    raise ValueError("productive Blender scenes adapter is not available in this increment")
+    runtime = _preflight_blender_runtime(blender_path)
+    raise ValueError(
+        "productive Blender scenes execution is not available until package validation and publication "
+        f"are implemented; Blender {runtime['version_string']} preflight passed; no worker was launched"
+    )
 
 
 def main(argv=None):
