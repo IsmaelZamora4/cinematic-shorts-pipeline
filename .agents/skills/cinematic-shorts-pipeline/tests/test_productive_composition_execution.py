@@ -216,7 +216,8 @@ class ProductiveCompositionExecutionTests(unittest.TestCase):
         def mutate_wav_during_blender(config_path, runtime):
             response = self.fake_blender(config_path, runtime)
             wav_path = self.root / ".pipeline/work/narration.wav"
-            wav_path.write_bytes(wav_path.read_bytes() + b"tamper")
+            with wav_path.open("ab") as stream:
+                stream.write(b"tamper")
             return response
         runtime = {"path": str(self.blender.resolve()), "sha256": hashlib.sha256(self.blender.read_bytes()).hexdigest(),
                    "version": [5, 2, 3], "version_string": "5.2.3"}
@@ -235,6 +236,109 @@ class ProductiveCompositionExecutionTests(unittest.TestCase):
         self.assertEqual([], manifest["stages"]["03-tts-narration"]["artifacts"])
         self.assertFalse((self.root / ".pipeline/work/scenes.zip").exists())
         self.assertFalse((self.root / ".pipeline/work/narration.wav").exists())
+
+    def test_combined_checkpoint_does_not_use_unbounded_wav_read(self):
+        wav_path = self.root / ".pipeline/work/narration.wav"
+        original_read_bytes = Path.read_bytes
+
+        def reject_unbounded_wav_read(path):
+            if path == wav_path:
+                raise AssertionError("unbounded WAV read")
+            return original_read_bytes(path)
+
+        with mock.patch.object(Path, "read_bytes", reject_unbounded_wav_read):
+            result = self.run_combined()
+
+        self.assertTrue(Path(result["manifest_path"]).is_file())
+
+    def test_combined_checkpoint_does_not_use_unbounded_provenance_read(self):
+        provenance_path = self.root / ".pipeline/work/narration-provenance.json"
+        original_read_text = Path.read_text
+
+        def reject_unbounded_provenance_read(path, *args, **kwargs):
+            if path == provenance_path:
+                raise AssertionError("unbounded provenance read")
+            return original_read_text(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", reject_unbounded_provenance_read):
+            result = self.run_combined()
+
+        self.assertTrue(Path(result["manifest_path"]).is_file())
+
+    def test_oversized_wav_before_blender_fails_without_starting_worker(self):
+        original_verify = pipeline._verify_combined_kokoro_checkpoint
+        original_read_bytes = Path.read_bytes
+        blender_calls = []
+        changed = False
+
+        def grow_before_checkpoint(*args):
+            nonlocal changed
+            wav_path = Path(args[5])
+            if not changed:
+                changed = True
+                with wav_path.open("ab") as stream:
+                    stream.write(b"X" * (pipeline.MAX_KOKORO_WAV_BYTES + 1))
+            return original_verify(*args)
+
+        def reject_unbounded_wav_read(path):
+            if path.name == "narration.wav":
+                raise AssertionError("unbounded WAV read")
+            return original_read_bytes(path)
+
+        runtime = {"path": str(self.blender.resolve()), "sha256": hashlib.sha256(self.blender.read_bytes()).hexdigest(),
+                   "version": (5, 2, 3), "version_string": "5.2.3"}
+        with mock.patch.object(pipeline, "_preflight_blender_runtime", return_value=runtime), \
+             mock.patch.object(pipeline, "_productive_worker", side_effect=self.fake_kokoro), \
+             mock.patch.object(pipeline, "_verify_combined_kokoro_checkpoint", side_effect=grow_before_checkpoint), \
+             mock.patch.object(pipeline, "_run_blender_scenes_worker", side_effect=lambda *args: blender_calls.append(args)), \
+             mock.patch.object(Path, "read_bytes", reject_unbounded_wav_read):
+            with self.assertRaisesRegex(ValueError, "maximum size"):
+                pipeline.run_productive_composition(
+                    self.config_path, python_path=self.python, model_path=self.model,
+                    voices_path=self.voices, blender_path=self.blender,
+                )
+
+        self.assertEqual([], blender_calls)
+        manifest_path = next(self.root.glob(".pipeline/runs/run-*/manifest.json"))
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual("completed", manifest["stages"]["01-validate-project"]["status"])
+        self.assertEqual("failed", manifest["stages"]["03-tts-narration"]["status"])
+        self.assertEqual("pending", manifest["stages"]["02-blender-scenes"]["status"])
+
+    def test_oversized_provenance_after_blender_fails_without_completing_stage_02(self):
+        original_read_text = Path.read_text
+
+        def mutate_provenance_during_blender(config_path, runtime):
+            result = self.fake_blender(config_path, runtime)
+            provenance_path = self.root / ".pipeline/work/narration-provenance.json"
+            with provenance_path.open("ab") as stream:
+                stream.write(b"X" * (pipeline.MAX_KOKORO_PROVENANCE_BYTES + 1))
+            return result
+
+        def reject_unbounded_provenance_read(path, *args, **kwargs):
+            if path.name == "narration-provenance.json":
+                raise AssertionError("unbounded provenance read")
+            return original_read_text(path, *args, **kwargs)
+
+        runtime = {"path": str(self.blender.resolve()), "sha256": hashlib.sha256(self.blender.read_bytes()).hexdigest(),
+                   "version": (5, 2, 3), "version_string": "5.2.3"}
+        with mock.patch.object(pipeline, "_preflight_blender_runtime", return_value=runtime), \
+             mock.patch.object(pipeline, "_productive_worker", side_effect=self.fake_kokoro), \
+             mock.patch.object(pipeline, "_run_blender_scenes_worker", side_effect=mutate_provenance_during_blender), \
+             mock.patch.object(Path, "read_text", reject_unbounded_provenance_read):
+            with self.assertRaisesRegex(ValueError, "changed during Blender"):
+                pipeline.run_productive_composition(
+                    self.config_path, python_path=self.python, model_path=self.model,
+                    voices_path=self.voices, blender_path=self.blender,
+                )
+
+        manifest_path = next(self.root.glob(".pipeline/runs/run-*/manifest.json"))
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual("completed", manifest["stages"]["01-validate-project"]["status"])
+        self.assertEqual("failed", manifest["stages"]["03-tts-narration"]["status"])
+        self.assertEqual("failed", manifest["stages"]["02-blender-scenes"]["status"])
+        self.assertEqual([], manifest["stages"]["02-blender-scenes"]["artifacts"])
+        self.assertFalse((self.root / ".pipeline/work/scenes.zip").exists())
 
     def test_runs_combined_stages_in_one_manifest_and_completes_01_03_02(self):
         result = self.run_combined()

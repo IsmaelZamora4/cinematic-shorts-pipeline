@@ -1770,7 +1770,7 @@ def _run_blender_process(command, cwd):
             windows_job.close()
 
 
-def _read_bounded_regular_file(path, maximum_size, label):
+def _read_bounded_regular_file(path, maximum_size, label, *, require_identity=False):
     path = Path(path)
     before = _inspect_path(path)
     if before is None or not stat.S_ISREG(before.st_mode):
@@ -1778,16 +1778,41 @@ def _read_bounded_regular_file(path, maximum_size, label):
     if before.st_size > maximum_size:
         raise ValueError(f"{label} exceeds maximum size of {maximum_size} bytes")
     identity = _file_identity(before)
+    if require_identity and identity is None:
+        raise ValueError(f"{label} filesystem identity cannot be verified")
+
+    def observation(entry):
+        return (
+            _file_identity(entry), entry.st_size,
+            getattr(entry, "st_mtime_ns", None),
+            getattr(entry, "st_ctime_ns", None) if os.name != "nt" else None,
+        )
+
+    before_observation = observation(before)
     with path.open("rb") as stream:
         opened = os.fstat(stream.fileno())
-        if identity is not None and _file_identity(opened) != identity:
+        if not stat.S_ISREG(opened.st_mode) or (identity is not None and _file_identity(opened) != identity):
+            raise ValueError(f"{label} changed while opening")
+        if require_identity and _file_identity(opened) is None:
+            raise ValueError(f"{label} filesystem identity cannot be verified")
+        if observation(opened) != before_observation:
             raise ValueError(f"{label} changed while opening")
         payload = stream.read(maximum_size + 1)
+        after_read = os.fstat(stream.fileno())
+        if len(payload) > maximum_size:
+            raise ValueError(f"{label} exceeds maximum size of {maximum_size} bytes")
+        if (
+            not stat.S_ISREG(after_read.st_mode)
+            or observation(after_read) != observation(opened)
+        ):
+            raise ValueError(f"{label} changed while reading")
     after = _inspect_path(path)
-    if after is None or (identity is not None and _file_identity(after) != identity):
+    if (
+        after is None or not stat.S_ISREG(after.st_mode)
+        or (identity is not None and _file_identity(after) != identity)
+        or observation(after) != observation(after_read)
+    ):
         raise ValueError(f"{label} changed while reading")
-    if len(payload) > maximum_size:
-        raise ValueError(f"{label} exceeds maximum size of {maximum_size} bytes")
     return payload
 
 
@@ -2661,10 +2686,18 @@ def _verify_combined_kokoro_checkpoint(config, config_path, manifest, stage_entr
     if not isinstance(expected_script_hash, str) or not FINGERPRINT.fullmatch(expected_script_hash):
         raise ValueError("current voiceover-script SHA-256 is unavailable")
 
-    wav_bytes = wav_path.read_bytes()
+    wav_bytes = _read_bounded_regular_file(
+        wav_path, MAX_KOKORO_WAV_BYTES, "Kokoro WAV", require_identity=True,
+    )
     wav_hash = hashlib.sha256(wav_bytes).hexdigest()
     audio = _inspect_kokoro_wav(wav_bytes)
-    provenance = _strict_load(provenance_path)
+    provenance_bytes = _read_bounded_regular_file(
+        provenance_path, MAX_KOKORO_PROVENANCE_BYTES, "Kokoro provenance", require_identity=True,
+    )
+    try:
+        provenance = STORYBOARD_VALIDATOR.parse_json(provenance_bytes.decode("utf-8"))
+    except (UnicodeError, ValueError) as exc:
+        raise ValueError(f"Kokoro provenance is invalid: {exc}") from exc
     if not isinstance(provenance, dict):
         raise ValueError("Kokoro provenance must be an object")
     hashes = provenance.get("hashes")
@@ -3972,11 +4005,15 @@ def run_productive_composition(config_path, *, python_path, model_path, voices_p
             stage_fingerprint=stage_fingerprint(config, stage03, stage03_hashes, {"kokoro": kokoro_tool_version}),
             tool_versions={"kokoro": kokoro_tool_version},
         )
-        _verify_combined_kokoro_checkpoint(
-            config, config_path, manifest, manifest["stages"], manifest["stages"][stage03["id"]],
-            stage03_paths["narration"], stage03_paths["narration-provenance"],
-            next(item for item in manifest["stages"][stage03["id"]]["artifacts"] if item["id"] == "narration"),
-        )
+        try:
+            _verify_combined_kokoro_checkpoint(
+                config, config_path, manifest, manifest["stages"], manifest["stages"][stage03["id"]],
+                stage03_paths["narration"], stage03_paths["narration-provenance"],
+                next(item for item in manifest["stages"][stage03["id"]]["artifacts"] if item["id"] == "narration"),
+            )
+        except (KeyError, StopIteration, TypeError, OSError, ValueError):
+            narration_integrity_failed = True
+            raise
         manifest_identity = _write_scene_checkpoint(manifest_path, manifest, manifest_identity)
 
         # The 24 source frames at 12 FPS represent exactly 48,000 samples at 24 kHz.
