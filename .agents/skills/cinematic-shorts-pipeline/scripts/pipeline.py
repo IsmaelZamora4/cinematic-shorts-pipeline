@@ -997,6 +997,9 @@ def validate_config(data, config_path, captured_resources=None):
                 elif input_id in output_ids and output_ids[input_id] not in ancestors[stage_id]:
                     errors.append(f"stage {stage_id} must depend on producer of input {input_id}")
 
+    if _has_productive_execution_intent(data) and _classify_productive_profile(data) is None:
+        errors.append("productive profile declaration does not match an authorized complete profile")
+
     return errors, warnings, waves
 
 
@@ -2317,6 +2320,30 @@ def _intends_productive_tts_config(config):
     )
 
 
+def _has_productive_execution_intent(config):
+    """Require strict profile authorization once a productive stage is activated."""
+    stages = config.get("stages") if isinstance(config, dict) else None
+    if not isinstance(stages, list):
+        return False
+    active_productive_stage = any(
+        isinstance(stage, dict)
+        and stage.get("id") in {"02-blender-scenes", TTS_NARRATION_STAGE_ID}
+        and stage.get("adapter_status") == "implemented"
+        for stage in stages
+    )
+    active_extra_stage = any(
+        isinstance(stage, dict)
+        and isinstance(stage.get("id"), str)
+        and stage.get("id") not in (set(REQUIRED_STAGE_IDS) | set(NARRATION_STAGE_IDS))
+        and stage.get("adapter_status") == "implemented"
+        for stage in stages
+    )
+    productive_markers = (
+        _intends_productive_scenes_config(config) or _intends_productive_tts_config(config)
+    )
+    return productive_markers and (active_productive_stage or active_extra_stage)
+
+
 def _is_productive_scenes_config(config):
     """Return whether a scene-profile declaration matches the 5B.1 eligibility signature."""
     project = config.get("project") if isinstance(config, dict) else None
@@ -2436,11 +2463,9 @@ def _profile_tool_map(config):
 
 
 def _profile_inactive_stages_pending(stages, active_ids):
-    allowed = set(REQUIRED_STAGE_IDS) | set(NARRATION_STAGE_IDS)
-    if not set(stages).issubset(allowed):
-        return False
     return all(
-        stage_id in active_ids or stage.get("adapter_status") == "pending"
+        isinstance(stage, dict)
+        and (stage_id in active_ids or stage.get("adapter_status") == "pending")
         for stage_id, stage in stages.items()
     )
 

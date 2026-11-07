@@ -68,6 +68,17 @@ class ProductiveTtsContractTests(unittest.TestCase):
         _, errors, _, _ = pipeline.load_and_validate_config(piper_path)
         self.assertEqual([], errors)
 
+    def test_rejects_implemented_extra_stage_in_productive_kokoro_profile(self):
+        self.config["stages"].append({
+            "id": "07-extra", "adapter": "extra-worker", "adapter_status": "implemented",
+            "depends_on": ["06-quality-control"], "inputs": ["storyboard"],
+            "outputs": [{"id": "extra-output", "path": ".pipeline/work/extra.json"}], "tools": [],
+        })
+        self.write_config()
+        loaded, errors, _, _ = pipeline.load_and_validate_config(self.config_path)
+        self.assertIsNone(pipeline._classify_productive_profile(loaded))
+        self.assertTrue(any("productive profile" in error for error in errors), errors)
+
     def test_rejects_productive_piper_and_missing_validation_artifact_input(self):
         tts = next(stage for stage in self.config["stages"] if stage["id"] == "03-tts-narration")
         tts["tts"]["provider"] = "piper"

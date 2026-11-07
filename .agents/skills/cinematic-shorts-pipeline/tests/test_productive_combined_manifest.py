@@ -60,6 +60,35 @@ class ProductiveCombinedManifestTests(unittest.TestCase):
             self._complete_narration(config, manifest, source_hashes, plan_hash)
         return config, manifest
 
+    def test_pending_extra_stage_preserves_contextual_scene_zip_validation(self):
+        self.config["stages"].append({
+            "id": "07-extra", "adapter": "extra-worker", "adapter_status": "pending",
+            "depends_on": ["06-quality-control"], "inputs": ["storyboard"],
+            "outputs": [{"id": "extra-output", "path": ".pipeline/work/extra.json"}], "tools": [],
+        })
+        self.write_config()
+        _, manifest = self.make_manifest(completed_through=2)
+        manifest_path = self.root / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        with mock.patch.object(pipeline, "validate_scene_package", wraps=pipeline.validate_scene_package) as validate_zip:
+            errors, _ = pipeline.validate_manifest_file(self.config_path, manifest_path)
+        self.assertEqual([], errors)
+        self.assertEqual(1, validate_zip.call_count)
+
+    def test_implemented_extra_stage_rejects_completed_scene_manifest_before_artifacts(self):
+        _, manifest = self.make_manifest(completed_through=2)
+        manifest_path = self.root / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        self.config["stages"].append({
+            "id": "07-extra", "adapter": "extra-worker", "adapter_status": "implemented",
+            "depends_on": ["06-quality-control"], "inputs": ["storyboard"],
+            "outputs": [{"id": "extra-output", "path": ".pipeline/work/extra.json"}], "tools": [],
+        })
+        self.write_config()
+        with mock.patch.object(pipeline, "validate_scene_package", side_effect=AssertionError("ZIP validation must not be skipped")):
+            errors, _ = pipeline.validate_manifest_file(self.config_path, manifest_path)
+        self.assertTrue(any("productive profile" in error for error in errors), errors)
+
     def _complete_scenes(self, config, manifest, source_hashes, plan_hash):
         stage = next(item for item in config["stages"] if item["id"] == "02-blender-scenes")
         runtime = {

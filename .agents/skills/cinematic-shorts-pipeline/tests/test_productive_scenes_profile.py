@@ -127,6 +127,14 @@ def make_combined_config(root):
     return config
 
 
+def add_extra_stage(config, adapter_status="pending"):
+    config["stages"].append({
+        "id": "07-extra", "adapter": "extra-worker", "adapter_status": adapter_status,
+        "depends_on": ["06-quality-control"], "inputs": ["storyboard"],
+        "outputs": [{"id": "extra-output", "path": ".pipeline/work/extra.json"}], "tools": [],
+    })
+
+
 class ProductiveScenesProfileTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -178,6 +186,30 @@ class ProductiveScenesProfileTests(unittest.TestCase):
         loaded, errors, _, _ = pipeline.load_and_validate_config(self.config_path)
         self.assertEqual([], errors)
         self.assertEqual("blender-independent", pipeline._classify_productive_profile(loaded))
+
+    def test_rejects_implemented_extra_stage_in_productive_blender_profile(self):
+        scenes = next(stage for stage in self.config["stages"] if stage["id"] == "02-blender-scenes")
+        scenes["adapter_status"] = "implemented"
+        next(tool for tool in self.config["tools"] if tool["id"] == "blender").update(
+            adapter_status="implemented", availability="verified")
+        add_extra_stage(self.config, "implemented")
+        self.write_config()
+        loaded, errors, _, _ = pipeline.load_and_validate_config(self.config_path)
+        self.assertIsNone(pipeline._classify_productive_profile(loaded))
+        self.assertTrue(any("productive profile" in error for error in errors), errors)
+
+    def test_accepts_pending_extra_stage_in_historical_declarative_v1_config(self):
+        add_extra_stage(self.config)
+        self.write_config()
+        loaded, errors, _, _ = pipeline.load_and_validate_config(self.config_path)
+        self.assertEqual([], errors)
+        self.assertTrue(pipeline._is_productive_scenes_config(loaded))
+
+    def test_rejects_malformed_extra_stage_status_with_controlled_validation_error(self):
+        add_extra_stage(self.config, [])
+        self.write_config()
+        _, errors, _, _ = pipeline.load_and_validate_config(self.config_path)
+        self.assertTrue(any("adapter_status must be 'pending' or 'implemented'" in error for error in errors), errors)
 
     def test_rejects_mixed_and_malformed_profile_inputs_without_uncaught_exceptions(self):
         cases = (
@@ -256,6 +288,14 @@ class ProductiveScenesProfileTests(unittest.TestCase):
         self.assertEqual("implemented", statuses["02-blender-scenes"])
         self.assertEqual("implemented", statuses["03-tts-narration"])
         self.assertEqual("pending", statuses["04-remotion-compose"])
+
+    def test_rejects_implemented_extra_stage_in_combined_profile(self):
+        self.config = make_combined_config(self.root)
+        add_extra_stage(self.config, "implemented")
+        self.write_config()
+        loaded, errors, _, _ = pipeline.load_and_validate_config(self.config_path)
+        self.assertIsNone(pipeline._classify_productive_profile(loaded))
+        self.assertTrue(any("productive profile" in error for error in errors), errors)
 
     def test_rejects_combined_declaration_with_stage_04_enabled(self):
         self.config = make_combined_config(self.root)
