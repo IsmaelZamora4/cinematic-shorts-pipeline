@@ -57,6 +57,7 @@ class ProductiveTtsContractTests(unittest.TestCase):
         self.assertEqual([], errors)
         self.assertEqual([], warnings)
         self.assertEqual("implemented", next(s for s in loaded["stages"] if s["id"] == "03-tts-narration")["adapter_status"])
+        self.assertEqual("kokoro-independent", pipeline._classify_productive_profile(loaded))
 
         piper_root = self.root / "piper"
         piper_root.mkdir()
