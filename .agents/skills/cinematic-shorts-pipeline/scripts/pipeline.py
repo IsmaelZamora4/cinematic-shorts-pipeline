@@ -2327,6 +2327,7 @@ def _has_productive_execution_intent(config):
         return False
     active_productive_stage = any(
         isinstance(stage, dict)
+        and isinstance(stage.get("id"), str)
         and stage.get("id") in {"02-blender-scenes", TTS_NARRATION_STAGE_ID}
         and stage.get("adapter_status") == "implemented"
         for stage in stages

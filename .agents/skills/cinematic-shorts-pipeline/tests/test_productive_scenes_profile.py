@@ -211,6 +211,35 @@ class ProductiveScenesProfileTests(unittest.TestCase):
         _, errors, _, _ = pipeline.load_and_validate_config(self.config_path)
         self.assertTrue(any("adapter_status must be 'pending' or 'implemented'" in error for error in errors), errors)
 
+    def test_rejects_non_string_extra_stage_ids_without_uncaught_exceptions(self):
+        for invalid_id in ([], {}, None, 123, ["07-extra"]):
+            with self.subTest(invalid_id=invalid_id):
+                self.config = make_scenes_config(self.root)
+                add_extra_stage(self.config)
+                self.config["stages"][-1]["id"] = invalid_id
+                self.write_config()
+                try:
+                    _, errors, _, _ = pipeline.load_and_validate_config(self.config_path)
+                except Exception as exc:
+                    self.fail(f"invalid stage id raised {type(exc).__name__}: {exc}")
+                self.assertTrue(errors)
+
+    def test_validate_manifest_file_rejects_non_string_extra_stage_ids_without_exception(self):
+        for invalid_id in ([], {}, None, 123, ["07-extra"]):
+            with self.subTest(invalid_id=invalid_id):
+                self.config = make_scenes_config(self.root)
+                manifest = pipeline.new_pending_manifest(self.config, self.config_path)
+                manifest_path = self.root / "manifest.json"
+                manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+                add_extra_stage(self.config)
+                self.config["stages"][-1]["id"] = invalid_id
+                self.write_config()
+                try:
+                    errors, _ = pipeline.validate_manifest_file(self.config_path, manifest_path)
+                except Exception as exc:
+                    self.fail(f"invalid stage id raised {type(exc).__name__}: {exc}")
+                self.assertTrue(errors)
+
     def test_rejects_mixed_and_malformed_profile_inputs_without_uncaught_exceptions(self):
         cases = (
             ("stage01", [{"not": "hashable"}]),
