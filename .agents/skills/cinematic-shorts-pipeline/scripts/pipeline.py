@@ -1864,7 +1864,10 @@ def _validate_blender_worker_response(data, runtime, project_id, scene_id, stagi
 def _run_blender_scenes_worker(config_path, runtime):
     """Prepare exclusive staging and run the fixed worker without publishing or updating a manifest."""
     config, errors, _, _ = load_and_validate_config(config_path)
-    if errors or not _is_productive_scenes_config(config):
+    if errors or not (
+        _is_productive_scenes_config(config)
+        or _classify_productive_profile(config) == "audiovisual-combined"
+    ):
         raise ValueError("Blender worker requires a valid productive Stage 01 + Stage 02 profile")
     version = runtime.get("version") if isinstance(runtime, dict) else None
     if not isinstance(version, tuple) or len(version) != 3 or version[:2] != (5, 2):
@@ -3826,6 +3829,304 @@ def run_productive_scenes(config_path, *, blender_path):
         raise
 
 
+def run_productive_composition(config_path, *, python_path, model_path, voices_path, blender_path):
+    """Execute combined Stage 01, Kokoro Stage 03, and Blender Stage 02 in one run."""
+    config, errors, warnings, waves = load_and_validate_config(config_path)
+    unexpected_warnings = _unexpected_scene_warnings(config, config_path, warnings) if config is not None else warnings
+    if errors or unexpected_warnings:
+        raise ValueError("invalid productive audiovisual profile: " + "; ".join(errors + unexpected_warnings))
+    if _classify_productive_profile(config) != "audiovisual-combined":
+        raise ValueError("run-productive-composition requires the complete audiovisual-combined profile")
+
+    root = Path(config_path).resolve().parent
+    stage01 = _productive_stage(config, "01-validate-project")
+    stage02 = _productive_stage(config, "02-blender-scenes")
+    stage03 = _productive_stage(config, TTS_NARRATION_STAGE_ID)
+    captured = {}
+    config_again, errors, _, waves = load_and_validate_config(config_path, captured)
+    if errors or config_again != config:
+        raise ValueError("pipeline config changed during execution preflight")
+    script_bytes = captured.get(VOICEOVER_SCRIPT_ID)
+    if not isinstance(script_bytes, bytes) or not 1 <= len(script_bytes) <= MAX_KOKORO_SCRIPT_BYTES:
+        raise ValueError(f"productive script must contain 1 to {MAX_KOKORO_SCRIPT_BYTES} UTF-8 bytes")
+
+    stage01_paths = _productive_paths(root, stage01)
+    stage02_paths = _productive_paths(root, stage02)
+    stage03_paths = _productive_paths(root, stage03)
+    outputs = {**stage01_paths, **stage02_paths, **stage03_paths}
+    output_paths = list(outputs.values())
+    if len({str(path).casefold() for path in output_paths}) != len(output_paths):
+        raise ValueError("productive outputs collide")
+    for path in output_paths:
+        _preflight_productive_path(path, "productive output")
+
+    manifest_components = tuple(PurePosixPath(config["workspace"]["manifest_dir"]).parts)
+    manifest = new_pending_manifest(config, config_path)
+    run_id = manifest["run_id"]
+    run_dir = root.joinpath(*manifest_components) / f"run-{run_id}"
+    manifest_path = run_dir / "manifest.json"
+    _preflight_productive_path(manifest_path, "manifest destination")
+
+    # Probe all trusted local runtimes/assets and capture the full DAG snapshot before publishing.
+    blender_runtime = _preflight_blender_runtime(blender_path)
+    _hash_local_runtime_file(python_path, "Python interpreter", 512 * 1024 * 1024)
+    _hash_local_runtime_file(model_path, "Kokoro model", 1024 * 1024 * 1024)
+    _hash_local_runtime_file(voices_path, "Kokoro voices", 256 * 1024 * 1024)
+    input_hashes, input_entries = _productive_snapshot(config, config_path)
+    if hashlib.sha256(script_bytes).hexdigest() != input_hashes.get(VOICEOVER_SCRIPT_INPUT):
+        raise ValueError("voiceover script changed during execution preflight")
+    plan = _validated_plan(config, config_path, waves, input_entries, input_hashes)
+    plan_bytes = (json.dumps(plan, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    if len(plan_bytes) > MAX_VALIDATED_PLAN_BYTES:
+        raise ValueError(f"validated-plan exceeds maximum size of {MAX_VALIDATED_PLAN_BYTES} bytes")
+
+    _ensure_project_output_directory(root, manifest_components)
+    try:
+        os.mkdir(run_dir, 0o700)
+    except FileExistsError as exc:
+        raise ValueError(f"manifest run directory already exists: {run_dir}") from exc
+    plan_owned, narration_owned, scene_owned = {}, {}, {}
+    manifest_identity = None
+    active_stage = stage01["id"]
+    worker_started = False
+    narration_integrity_failed = False
+    try:
+        manifest_identity = _write_scene_checkpoint(manifest_path, manifest, manifest_identity)
+
+        # Stage 01: publish one validated plan representing the complete combined DAG.
+        _ensure_project_output_directory(root, tuple(stage01_paths["validated-plan"].relative_to(root).parts[:-1]))
+        _write_exclusive_file(stage01_paths["validated-plan"], plan_bytes, plan_owned)
+        verified_plan = _read_owned_file(stage01_paths["validated-plan"], MAX_VALIDATED_PLAN_BYTES,
+                                         plan_owned[stage01_paths["validated-plan"]])
+        _verify_validated_plan(verified_plan, config, config_path, waves)
+        plan_hash = hashlib.sha256(verified_plan).hexdigest()
+        stage01_hashes = {key: input_hashes[key] for key in stage01["inputs"]}
+        manifest["stages"][stage01["id"]].update(
+            status="completed", attempts=1,
+            artifacts=[{"id": "validated-plan", "path": stage01["outputs"][0]["path"], "sha256": plan_hash}],
+            stage_fingerprint=stage_fingerprint(config, stage01, stage01_hashes, {}),
+        )
+        manifest_identity = _write_scene_checkpoint(manifest_path, manifest, manifest_identity)
+        _assert_productive_config_unchanged(config, config_path)
+        if _productive_snapshot(config, config_path)[0] != input_hashes:
+            raise ValueError("project inputs changed before Kokoro execution")
+
+        # Stage 03: reuse the fixed Kokoro worker and bind provenance to this run and plan.
+        active_stage = stage03["id"]
+        worker_started = True
+        kokoro = _productive_worker(config_path, script_bytes, python_path=python_path,
+                                    model_path=model_path, voices_path=voices_path)
+        if _productive_snapshot(config, config_path)[0] != input_hashes:
+            raise ValueError("project inputs changed while Kokoro was running")
+        _assert_productive_config_unchanged(config, config_path)
+        if hashlib.sha256(script_bytes).hexdigest() != input_hashes[VOICEOVER_SCRIPT_INPUT]:
+            raise ValueError("voiceover script changed during execution")
+        runtime = {
+            "python_version": kokoro["python_version"], "worker_sha256": kokoro["worker_sha256"],
+            "dependencies": kokoro["versions"],
+            "onnx_execution_providers": kokoro["worker_result"]["onnx_execution_providers"],
+        }
+        provenance = {
+            "provenance_version": 1, "record_type": "productive-local-kokoro-tts",
+            "run_id": run_id, "project_id": config["project"]["id"],
+            "dag_stage_id": TTS_NARRATION_STAGE_ID, "provider": "kokoro-onnx",
+            "voice": KOKORO_VOICE, "language": KOKORO_LANGUAGE,
+            "requested_audio": dict(KOKORO_AUDIO), "audio": kokoro["audio"], "runtime": runtime,
+            "assets": {key: kokoro[key] for key in ("model", "voices")},
+            "hashes": {"script_sha256": input_hashes[VOICEOVER_SCRIPT_INPUT],
+                       "wav_sha256": hashlib.sha256(kokoro["wav_bytes"]).hexdigest(),
+                       "validated_plan_sha256": plan_hash},
+            "timing_seconds": kokoro["worker_result"]["timing_seconds"],
+            "timeout_seconds": KOKORO_TIMEOUT_SECONDS, "attempts": 1, "automatic_retries": False,
+        }
+        provenance_bytes = (json.dumps(provenance, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
+        if len(provenance_bytes) > MAX_KOKORO_PROVENANCE_BYTES:
+            raise ValueError("productive Kokoro provenance exceeds maximum size")
+        for output_id, payload in (("narration", kokoro["wav_bytes"]),
+                                   ("narration-provenance", provenance_bytes)):
+            path = stage03_paths[output_id]
+            _ensure_project_output_directory(root, tuple(path.relative_to(root).parts[:-1]))
+            _write_exclusive_file(path, payload, narration_owned)
+        published_wav = _read_owned_file(stage03_paths["narration"], MAX_KOKORO_WAV_BYTES,
+                                         narration_owned[stage03_paths["narration"]])
+        published_audio = _inspect_kokoro_wav(published_wav)
+        published_provenance = _read_owned_file(stage03_paths["narration-provenance"],
+                                                MAX_KOKORO_PROVENANCE_BYTES,
+                                                narration_owned[stage03_paths["narration-provenance"]])
+        if (published_audio != kokoro["audio"]
+                or hashlib.sha256(published_wav).hexdigest() != provenance["hashes"]["wav_sha256"]
+                or STORYBOARD_VALIDATOR.parse_json(published_provenance.decode("utf-8")) != provenance):
+            raise ValueError("productive Kokoro outputs failed post-publication verification")
+        if _productive_snapshot(config, config_path)[0] != input_hashes:
+            raise ValueError("project inputs changed before Kokoro checkpoint")
+        tool_identity = {"runtime": runtime,
+                         "assets": {key: {"sha256": kokoro[key]["sha256"]} for key in ("model", "voices")}}
+        kokoro_tool_version = json.dumps(tool_identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        stage03_hashes = {"validated-plan": plan_hash, VOICEOVER_SCRIPT_INPUT: input_hashes[VOICEOVER_SCRIPT_INPUT]}
+        manifest["stages"][stage03["id"]].update(
+            status="completed", attempts=1,
+            artifacts=[{"id": output_id, "path": stage03_paths[output_id].relative_to(root).as_posix(),
+                        "sha256": hashlib.sha256(payload).hexdigest()}
+                       for output_id, payload in (("narration", published_wav),
+                                                 ("narration-provenance", published_provenance))],
+            stage_fingerprint=stage_fingerprint(config, stage03, stage03_hashes, {"kokoro": kokoro_tool_version}),
+            tool_versions={"kokoro": kokoro_tool_version},
+        )
+        _verify_combined_kokoro_checkpoint(
+            config, config_path, manifest, manifest["stages"], manifest["stages"][stage03["id"]],
+            stage03_paths["narration"], stage03_paths["narration-provenance"],
+            next(item for item in manifest["stages"][stage03["id"]]["artifacts"] if item["id"] == "narration"),
+        )
+        manifest_identity = _write_scene_checkpoint(manifest_path, manifest, manifest_identity)
+
+        # The 24 source frames at 12 FPS represent exactly 48,000 samples at 24 kHz.
+        active_stage = stage02["id"]
+        worker_started = False
+        try:
+            narration_artifact = next(item for item in manifest["stages"][stage03["id"]]["artifacts"]
+                                      if item["id"] == "narration")
+            _verify_combined_kokoro_checkpoint(
+                config, config_path, manifest, manifest["stages"], manifest["stages"][stage03["id"]],
+                stage03_paths["narration"], stage03_paths["narration-provenance"], narration_artifact,
+            )
+        except (KeyError, StopIteration, TypeError, OSError, ValueError) as integrity_exc:
+            narration_integrity_failed = True
+            raise ValueError(f"Kokoro outputs changed before Blender execution: {integrity_exc}") from integrity_exc
+        if published_audio["frames"] > 48_000:
+            raise ValueError("Kokoro WAV exceeds the 48,000-sample, two-second Blender composition limit")
+        _assert_productive_config_unchanged(config, config_path)
+        if _productive_snapshot(config, config_path)[0] != input_hashes:
+            raise ValueError("project inputs changed before Blender execution")
+        worker_started = True
+        blender = _run_blender_scenes_worker(config_path, blender_runtime)
+        _assert_productive_config_unchanged(config, config_path)
+        if _productive_snapshot(config, config_path)[0] != input_hashes:
+            raise ValueError("project inputs changed while Blender was running")
+        try:
+            narration_artifact = next(item for item in manifest["stages"][stage03["id"]]["artifacts"]
+                                      if item["id"] == "narration")
+            _verify_combined_kokoro_checkpoint(
+                config, config_path, manifest, manifest["stages"], manifest["stages"][stage03["id"]],
+                stage03_paths["narration"], stage03_paths["narration-provenance"], narration_artifact,
+            )
+        except (KeyError, StopIteration, TypeError, OSError, ValueError) as integrity_exc:
+            narration_integrity_failed = True
+            raise ValueError(f"Kokoro outputs changed during Blender execution: {integrity_exc}") from integrity_exc
+        spec = _validated_scene_spec_for_package(config, config_path)
+        response = blender["response"]
+        if response["scene_id"] != spec["scene_id"]:
+            raise ValueError("Blender worker scene ID differs from current scene spec")
+        worker_path, worker_hash, _ = _blender_worker_path()
+        runtime_record = {
+            "blender_version": list(response["blender_version"]),
+            "blender_version_string": response["blender_version_string"],
+            "blender_version_cycle": "release", "blender_executable_sha256": blender_runtime["sha256"],
+            "worker_version": response["worker_version"], "worker_sha256": worker_hash,
+        }
+        blender_tool_version = json.dumps(runtime_record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        stage02_hashes = {key: input_hashes[key] for key in stage02["inputs"] if key != "validated-plan"}
+        stage02_hashes["validated-plan"] = plan_hash
+        stage02_fingerprint = stage_fingerprint(config, stage02, stage02_hashes, {"blender": blender_tool_version})
+        observed = {key: response[key] for key in (
+            "frames", "minimum_camera_target_distance_m", "render_seconds", "worker_seconds",
+        )}
+        staged_archive = Path(blender["staging_root"]) / "scene-package.zip"
+        archive_digest = build_scene_package(
+            blender["staging_root"], staged_archive, project_id=config["project"]["id"],
+            scene_id=spec["scene_id"], run_id=run_id, runtime=runtime_record,
+            input_hashes=stage02_hashes,
+            stage_01_fingerprint=manifest["stages"][stage01["id"]]["stage_fingerprint"],
+            stage_02_fingerprint=stage02_fingerprint, render_seed=spec["render"]["seed"], observed=observed,
+        )
+        scene_candidate = {
+            "status": "completed", "attempts": 1, "error": None,
+            "depends_on": stage02["depends_on"],
+            "artifacts": [{"id": "scene-package", "path": stage02["outputs"][0]["path"], "sha256": archive_digest}],
+            "stage_fingerprint": stage02_fingerprint, "tool_versions": {"blender": blender_tool_version},
+        }
+        candidate_manifest = dict(manifest, stages={**manifest["stages"], stage02["id"]: scene_candidate})
+        context = _scene_package_context(config, config_path, candidate_manifest, archive_digest, runtime_record)
+        with staged_archive.open("rb") as stream:
+            validate_scene_package(stream, expected_context=context)
+        _assert_productive_config_unchanged(config, config_path)
+        if _productive_snapshot(config, config_path)[0] != input_hashes:
+            raise ValueError("project inputs changed before scene package publication")
+        if _hash_local_runtime_file(blender_runtime["path"], "Blender executable", 1024 * 1024 * 1024)[1] != blender_runtime["sha256"]:
+            raise ValueError("Blender executable changed before scene package publication")
+        if _hash_local_runtime_file(worker_path, "Blender scenes worker", 4 * 1024 * 1024)[1] != worker_hash:
+            raise ValueError("Blender scenes worker changed before scene package publication")
+        archive_path = stage02_paths["scene-package"]
+        _ensure_project_output_directory(root, tuple(archive_path.relative_to(root).parts[:-1]))
+        _preflight_productive_path(archive_path, "scene package output")
+        scene_owned = _copy_exclusive_archive(staged_archive, archive_path)
+        with archive_path.open("rb") as stream:
+            validate_scene_package(stream, expected_context=context)
+        if _file_identity(_inspect_path(archive_path)) != scene_owned[archive_path]:
+            raise ValueError("published scene package identity changed during validation")
+        if _productive_snapshot(config, config_path)[0] != input_hashes:
+            raise ValueError("project inputs changed before Stage 02 checkpoint")
+        manifest["stages"][stage02["id"]] = scene_candidate
+        manifest_identity = _write_scene_checkpoint(manifest_path, manifest, manifest_identity)
+        final_errors, final_warnings = validate_manifest_file(config_path, manifest_path)
+        unexpected_warnings = _unexpected_scene_warnings(config, config_path, final_warnings)
+        if final_errors or unexpected_warnings:
+            raise ValueError("final audiovisual manifest validation failed: " + "; ".join(final_errors + unexpected_warnings))
+        return {"manifest_path": str(manifest_path), "run_id": run_id,
+                "stages": {key: value["status"] for key, value in manifest["stages"].items()},
+                "audio": published_audio, "provenance": provenance}
+    except (Exception, KeyboardInterrupt) as exc:
+        reason = str(exc).strip() or type(exc).__name__
+        changed_inputs = "project inputs changed" in reason or "pipeline config changed" in reason or "script changed" in reason
+        validation_entry = manifest["stages"][stage01["id"]]
+        narration_entry = manifest["stages"][stage03["id"]]
+        scene_entry = manifest["stages"][stage02["id"]]
+        if changed_inputs:
+            for owned in (plan_owned, narration_owned, scene_owned):
+                for owned_path, identity in owned.items():
+                    _remove_owned_file(owned_path, identity)
+            for stage_id, entry in ((stage01["id"], validation_entry),
+                                    (stage03["id"], narration_entry),
+                                    (stage02["id"], scene_entry)):
+                if entry["status"] == "completed" or stage_id == active_stage or stage_id == stage01["id"]:
+                    entry.update(status="failed", attempts=1, error="project inputs changed during execution",
+                                 artifacts=[], stage_fingerprint=None, tool_versions={})
+                elif entry["status"] == "pending" and active_stage == stage03["id"] and stage_id == stage02["id"]:
+                    entry.update(status="blocked", error="03-tts-narration failed after project inputs changed")
+        elif validation_entry["status"] == "pending":
+            for owned_path, identity in plan_owned.items():
+                _remove_owned_file(owned_path, identity)
+            validation_entry.update(status="failed", attempts=1, error=reason[:500])
+            narration_entry.update(status="blocked", error="01-validate-project failed")
+            scene_entry.update(status="blocked", error="01-validate-project failed")
+        elif active_stage == stage03["id"] and narration_entry["status"] != "completed":
+            for owned_path, identity in narration_owned.items():
+                _remove_owned_file(owned_path, identity)
+            narration_entry.update(status="failed" if worker_started else "blocked",
+                                   attempts=1 if worker_started else 0, error=reason[:500], artifacts=[],
+                                   stage_fingerprint=None, tool_versions={})
+        elif active_stage == stage02["id"] and scene_entry["status"] != "completed":
+            for owned_path, identity in scene_owned.items():
+                _remove_owned_file(owned_path, identity)
+            scene_entry.update(status="failed" if worker_started else "blocked",
+                               attempts=1 if worker_started else 0, error=reason[:500], artifacts=[],
+                               stage_fingerprint=None, tool_versions={})
+        elif active_stage == stage02["id"] and scene_entry["status"] == "completed":
+            for owned_path, identity in scene_owned.items():
+                _remove_owned_file(owned_path, identity)
+            scene_entry.update(status="failed", attempts=1, error=reason[:500], artifacts=[],
+                               stage_fingerprint=None, tool_versions={})
+        if narration_integrity_failed:
+            for owned_path, identity in narration_owned.items():
+                _remove_owned_file(owned_path, identity)
+            narration_entry.update(status="failed", attempts=1, error=reason[:500], artifacts=[],
+                                   stage_fingerprint=None, tool_versions={})
+        try:
+            _write_scene_checkpoint(manifest_path, manifest, manifest_identity)
+        except (OSError, ValueError) as persist_exc:
+            raise ValueError(f"productive audiovisual run failed and failure manifest could not be persisted: {persist_exc}") from exc
+        raise
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -3865,6 +4166,14 @@ def main(argv=None):
     )
     scenes_parser.add_argument("config", help="pipeline JSON file; its directory is the project root")
     scenes_parser.add_argument("--blender", required=True, help="absolute path to the trusted Blender executable")
+    composition_parser = commands.add_parser(
+        "run-productive-composition", help="run combined Stage 01, Kokoro Stage 03, then Blender Stage 02"
+    )
+    composition_parser.add_argument("config", help="pipeline JSON file; its directory is the project root")
+    composition_parser.add_argument("--python", required=True, help="absolute path to trusted Python interpreter")
+    composition_parser.add_argument("--model", required=True, help="absolute path to the local Kokoro ONNX model")
+    composition_parser.add_argument("--voices", required=True, help="absolute path to the local Kokoro voices file")
+    composition_parser.add_argument("--blender", required=True, help="absolute path to the trusted Blender executable")
     args = parser.parse_args(argv)
 
     if args.command == "validate-manifest":
@@ -3925,6 +4234,18 @@ def main(argv=None):
     if args.command == "run-productive-scenes":
         try:
             result = run_productive_scenes(args.config, blender_path=args.blender)
+        except (OSError, ValueError) as exc:
+            print(json.dumps({"error": str(exc), "simulation": False}, ensure_ascii=False, sort_keys=True))
+            return 1
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
+        return 0
+
+    if args.command == "run-productive-composition":
+        try:
+            result = run_productive_composition(
+                args.config, python_path=args.python, model_path=args.model,
+                voices_path=args.voices, blender_path=args.blender,
+            )
         except (OSError, ValueError) as exc:
             print(json.dumps({"error": str(exc), "simulation": False}, ensure_ascii=False, sort_keys=True))
             return 1

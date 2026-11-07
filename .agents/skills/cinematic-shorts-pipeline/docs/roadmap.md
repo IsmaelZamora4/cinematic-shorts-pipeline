@@ -134,7 +134,7 @@ El plan original proponía integrar el piloto Kokoro al DAG con persistencia/hue
 
 Los runners productivos independientes cubren Stage 01/03 Kokoro y Stage 01/02 Blender. No existe un perfil que los ejecute juntos, ni composición Remotion, finalización FFmpeg, QA audiovisual, alineador de subtítulos, descargador/verificador de licencias, retries, resume u orquestación audiovisual general. La rúbrica y benchmarks siguen siendo protocolos, no resultados medidos. La generación completa de cortos verticales no está implementada.
 
-Propuesta Phase 5C.1 para auditoría, sin implementación: [diseño de composición productiva Remotion](remotion-productive-composition-design.md).
+Diseño aprobado de Phase 5C.1 e integrado mediante PR #27: [diseño de composición productiva Remotion](remotion-productive-composition-design.md).
 
 ## v0.10 — Phase 5A: Blender Productive Adapter Architecture (completada)
 
@@ -214,3 +214,11 @@ Propuesta Phase 5C.1 para auditoría, sin implementación: [diseño de composici
 
 - Actualizar el estado oficial de Phase 5B.5B/5B.6 y distinguir evidencia técnica, apertura del archivo y aprobación artística.
 - Mantener `pipeline_version: 1`, `manifest_version: 1`, Scene Spec v1, fingerprints y manifiestos históricos sin cambios; Phase 5C se planificará por separado.
+
+## v0.10 — Phase 5C: integración audiovisual productiva
+
+- Phase 5C.1 (diseño) y 5C.2 (clasificación y validación de perfiles) están aprobadas e integradas mediante PR #27 y PR #28.
+- Phase 5C.3 añade `run-productive-composition`: un manifiesto y `run_id`, con un `validated-plan` para el DAG combinado y ejecución serial Stage 01 → Stage 03 Kokoro → comprobación de duración → Stage 02 Blender. Los runners independientes conservan su comportamiento.
+- El MVP admite hasta 48 000 muestras PCM a 24 kHz (dos segundos a 12 FPS/24 frames). Audio más largo detiene Stage 02 y conserva los checkpoints verificados de Stage 01/03; no se recorta ni retimea el WAV.
+- Debido a la validación vigente del manifiesto combinado, Stage 04/05/06 se mantienen `pending`, incluso si falla una etapa anterior. Se registra el fallo en Stage 01/02/03 correspondiente; no se usa Stage 04 `blocked` descrito en algunos ejemplos del diseño aprobado. La modificación del esquema queda fuera de 5C.3.
+- Phase 5C.3 no implementa Remotion, FFmpeg ni QA y no ejecuta motores reales durante CI. Requiere auditoría independiente antes del merge.
