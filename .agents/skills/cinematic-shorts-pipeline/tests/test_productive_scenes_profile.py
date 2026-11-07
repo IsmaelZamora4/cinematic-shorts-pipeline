@@ -92,6 +92,49 @@ def make_scenes_config(root):
     return config
 
 
+def make_combined_config(root):
+    config = make_scenes_config(root)
+    config["project"]["resources"].append({
+        "id": "voiceover-script", "path": "voiceover-script.txt", "required": True,
+        "kind": "voiceover-script",
+    })
+    (Path(root) / "voiceover-script.txt").write_text("Una prueba de narración.\n", encoding="utf-8")
+    validation = next(stage for stage in config["stages"] if stage["id"] == "01-validate-project")
+    validation["inputs"].append("resource-voiceover-script")
+    blender_stage = next(stage for stage in config["stages"] if stage["id"] == "02-blender-scenes")
+    blender_stage["adapter_status"] = "implemented"
+    narration = next(stage for stage in config["stages"] if stage["id"] == "03-kokoro-narration")
+    narration.update(
+        id="03-tts-narration", adapter="tts-narration", adapter_status="implemented",
+        depends_on=["01-validate-project"],
+        inputs=["validated-plan", "resource-voiceover-script"],
+        outputs=[
+            {"id": "narration", "path": ".pipeline/work/narration.wav"},
+            {"id": "narration-provenance", "path": ".pipeline/work/narration-provenance.json"},
+        ], tools=["kokoro"],
+        tts={"provider": "kokoro", "voice": "em_alex", "language": "es",
+             "audio": {"container": "wav", "sample_rate_hz": 24000, "channels": 1,
+                       "sample_format": "pcm_s16le"},
+             "script_input": "resource-voiceover-script"},
+    )
+    compose = next(stage for stage in config["stages"] if stage["id"] == "04-remotion-compose")
+    compose["depends_on"] = ["02-blender-scenes", "03-tts-narration"]
+    for tool in config["tools"]:
+        if tool["id"] in {"blender", "kokoro"}:
+            tool.update(availability="verified", adapter_status="implemented")
+            if tool["id"] == "kokoro":
+                tool["version_requirement"] = "kokoro-onnx==0.6.1; Python>=3.10,<3.14; CPUExecutionProvider"
+    return config
+
+
+def add_extra_stage(config, adapter_status="pending"):
+    config["stages"].append({
+        "id": "07-extra", "adapter": "extra-worker", "adapter_status": adapter_status,
+        "depends_on": ["06-quality-control"], "inputs": ["storyboard"],
+        "outputs": [{"id": "extra-output", "path": ".pipeline/work/extra.json"}], "tools": [],
+    })
+
+
 class ProductiveScenesProfileTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -133,6 +176,132 @@ class ProductiveScenesProfileTests(unittest.TestCase):
             {"pending"},
             {stage["adapter_status"] for stage in loaded["stages"] if stage["id"] != "01-validate-project"},
         )
+
+    def test_classifies_complete_independent_blender_profile(self):
+        scenes = next(stage for stage in self.config["stages"] if stage["id"] == "02-blender-scenes")
+        scenes["adapter_status"] = "implemented"
+        blender = next(tool for tool in self.config["tools"] if tool["id"] == "blender")
+        blender.update(adapter_status="implemented", availability="verified")
+        self.write_config()
+        loaded, errors, _, _ = pipeline.load_and_validate_config(self.config_path)
+        self.assertEqual([], errors)
+        self.assertEqual("blender-independent", pipeline._classify_productive_profile(loaded))
+
+    def test_rejects_implemented_extra_stage_in_productive_blender_profile(self):
+        scenes = next(stage for stage in self.config["stages"] if stage["id"] == "02-blender-scenes")
+        scenes["adapter_status"] = "implemented"
+        next(tool for tool in self.config["tools"] if tool["id"] == "blender").update(
+            adapter_status="implemented", availability="verified")
+        add_extra_stage(self.config, "implemented")
+        self.write_config()
+        loaded, errors, _, _ = pipeline.load_and_validate_config(self.config_path)
+        self.assertIsNone(pipeline._classify_productive_profile(loaded))
+        self.assertTrue(any("productive profile" in error for error in errors), errors)
+
+    def test_accepts_pending_extra_stage_in_historical_declarative_v1_config(self):
+        add_extra_stage(self.config)
+        self.write_config()
+        loaded, errors, _, _ = pipeline.load_and_validate_config(self.config_path)
+        self.assertEqual([], errors)
+        self.assertTrue(pipeline._is_productive_scenes_config(loaded))
+
+    def test_rejects_malformed_extra_stage_status_with_controlled_validation_error(self):
+        add_extra_stage(self.config, [])
+        self.write_config()
+        _, errors, _, _ = pipeline.load_and_validate_config(self.config_path)
+        self.assertTrue(any("adapter_status must be 'pending' or 'implemented'" in error for error in errors), errors)
+
+    def test_rejects_mixed_and_malformed_profile_inputs_without_uncaught_exceptions(self):
+        cases = (
+            ("stage01", [{"not": "hashable"}]),
+            ("stage02", [[]]),
+            ("stage03", [None]),
+        )
+        for target, malformed_inputs in cases:
+            with self.subTest(target=target):
+                self.config = make_combined_config(self.root)
+                stage_id = {
+                    "stage01": "01-validate-project",
+                    "stage02": "02-blender-scenes",
+                    "stage03": "03-tts-narration",
+                }[target]
+                stage = next(item for item in self.config["stages"] if item["id"] == stage_id)
+                stage["inputs"] = malformed_inputs
+                self.write_config()
+                self.assertIsNone(pipeline._classify_productive_profile(self.config))
+                _, errors, _, _ = pipeline.load_and_validate_config(self.config_path)
+                self.assertTrue(errors)
+
+    def test_rejects_missing_fields_and_wrong_profile_input_types_without_tracebacks(self):
+        cases = (
+            ("01-validate-project", "inputs", None),
+            ("02-blender-scenes", "inputs", {"storyboard": True}),
+            ("03-tts-narration", "tts", []),
+        )
+        for stage_id, key, value in cases:
+            with self.subTest(stage=stage_id, key=key):
+                self.config = make_combined_config(self.root)
+                stage = next(item for item in self.config["stages"] if item["id"] == stage_id)
+                if value is None:
+                    stage.pop(key, None)
+                else:
+                    stage[key] = value
+                self.write_config()
+                self.assertIsNone(pipeline._classify_productive_profile(self.config))
+                _, errors, _, _ = pipeline.load_and_validate_config(self.config_path)
+                self.assertTrue(errors)
+
+    def test_rejects_partial_and_ambiguous_profile_classification(self):
+        self.config = make_combined_config(self.root)
+        scene = next(stage for stage in self.config["stages"] if stage["id"] == "02-blender-scenes")
+        scene["adapter_status"] = "pending"
+        self.assertIsNone(pipeline._classify_productive_profile(self.config))
+        self.write_config()
+        self.assertTrue(self.errors())
+
+        self.config = make_scenes_config(self.root)
+        next(tool for tool in self.config["tools"] if tool["id"] == "blender")["adapter_status"] = "implemented"
+        self.assertIsNone(pipeline._classify_productive_profile(self.config))
+        self.write_config()
+        self.assertTrue(self.errors())
+
+        self.config = make_combined_config(self.root)
+        scene = next(stage for stage in self.config["stages"] if stage["id"] == "02-blender-scenes")
+        scene["adapter"] = "unexpected-scenes-adapter"
+        self.assertIsNone(pipeline._classify_productive_profile(self.config))
+        self.write_config()
+        self.assertTrue(self.errors())
+
+        self.config = make_combined_config(self.root)
+        self.config["stages"].pop()
+        self.assertIsNone(pipeline._classify_productive_profile(self.config))
+        self.write_config()
+        self.assertTrue(self.errors())
+
+    def test_accepts_complete_combined_declaration_without_enabling_stage_04(self):
+        self.config = make_combined_config(self.root)
+        self.write_config()
+        loaded, errors, _, _ = pipeline.load_and_validate_config(self.config_path)
+        self.assertEqual([], errors)
+        self.assertEqual("audiovisual-combined", pipeline._classify_productive_profile(loaded))
+        statuses = {stage["id"]: stage["adapter_status"] for stage in loaded["stages"]}
+        self.assertEqual("implemented", statuses["02-blender-scenes"])
+        self.assertEqual("implemented", statuses["03-tts-narration"])
+        self.assertEqual("pending", statuses["04-remotion-compose"])
+
+    def test_rejects_implemented_extra_stage_in_combined_profile(self):
+        self.config = make_combined_config(self.root)
+        add_extra_stage(self.config, "implemented")
+        self.write_config()
+        loaded, errors, _, _ = pipeline.load_and_validate_config(self.config_path)
+        self.assertIsNone(pipeline._classify_productive_profile(loaded))
+        self.assertTrue(any("productive profile" in error for error in errors), errors)
+
+    def test_rejects_combined_declaration_with_stage_04_enabled(self):
+        self.config = make_combined_config(self.root)
+        next(stage for stage in self.config["stages"] if stage["id"] == "04-remotion-compose")["adapter_status"] = "implemented"
+        self.write_config()
+        self.assertTrue(self.errors())
 
     def test_rejects_stage_02_additional_dependency(self):
         scenes = next(stage for stage in self.config["stages"] if stage["id"] == "02-blender-scenes")
