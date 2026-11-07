@@ -92,6 +92,41 @@ def make_scenes_config(root):
     return config
 
 
+def make_combined_config(root):
+    config = make_scenes_config(root)
+    config["project"]["resources"].append({
+        "id": "voiceover-script", "path": "voiceover-script.txt", "required": True,
+        "kind": "voiceover-script",
+    })
+    (Path(root) / "voiceover-script.txt").write_text("Una prueba de narración.\n", encoding="utf-8")
+    validation = next(stage for stage in config["stages"] if stage["id"] == "01-validate-project")
+    validation["inputs"].append("resource-voiceover-script")
+    blender_stage = next(stage for stage in config["stages"] if stage["id"] == "02-blender-scenes")
+    blender_stage["adapter_status"] = "implemented"
+    narration = next(stage for stage in config["stages"] if stage["id"] == "03-kokoro-narration")
+    narration.update(
+        id="03-tts-narration", adapter="tts-narration", adapter_status="implemented",
+        depends_on=["01-validate-project"],
+        inputs=["validated-plan", "resource-voiceover-script"],
+        outputs=[
+            {"id": "narration", "path": ".pipeline/work/narration.wav"},
+            {"id": "narration-provenance", "path": ".pipeline/work/narration-provenance.json"},
+        ], tools=["kokoro"],
+        tts={"provider": "kokoro", "voice": "em_alex", "language": "es",
+             "audio": {"container": "wav", "sample_rate_hz": 24000, "channels": 1,
+                       "sample_format": "pcm_s16le"},
+             "script_input": "resource-voiceover-script"},
+    )
+    compose = next(stage for stage in config["stages"] if stage["id"] == "04-remotion-compose")
+    compose["depends_on"] = ["02-blender-scenes", "03-tts-narration"]
+    for tool in config["tools"]:
+        if tool["id"] in {"blender", "kokoro"}:
+            tool.update(availability="verified", adapter_status="implemented")
+            if tool["id"] == "kokoro":
+                tool["version_requirement"] = "kokoro-onnx==0.6.1; Python>=3.10,<3.14; CPUExecutionProvider"
+    return config
+
+
 class ProductiveScenesProfileTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -133,6 +168,23 @@ class ProductiveScenesProfileTests(unittest.TestCase):
             {"pending"},
             {stage["adapter_status"] for stage in loaded["stages"] if stage["id"] != "01-validate-project"},
         )
+
+    def test_accepts_complete_combined_declaration_without_enabling_stage_04(self):
+        self.config = make_combined_config(self.root)
+        self.write_config()
+        loaded, errors, _, _ = pipeline.load_and_validate_config(self.config_path)
+        self.assertEqual([], errors)
+        self.assertEqual("audiovisual-combined", pipeline._classify_productive_profile(loaded))
+        statuses = {stage["id"]: stage["adapter_status"] for stage in loaded["stages"]}
+        self.assertEqual("implemented", statuses["02-blender-scenes"])
+        self.assertEqual("implemented", statuses["03-tts-narration"])
+        self.assertEqual("pending", statuses["04-remotion-compose"])
+
+    def test_rejects_combined_declaration_with_stage_04_enabled(self):
+        self.config = make_combined_config(self.root)
+        next(stage for stage in self.config["stages"] if stage["id"] == "04-remotion-compose")["adapter_status"] = "implemented"
+        self.write_config()
+        self.assertTrue(self.errors())
 
     def test_rejects_stage_02_additional_dependency(self):
         scenes = next(stage for stage in self.config["stages"] if stage["id"] == "02-blender-scenes")

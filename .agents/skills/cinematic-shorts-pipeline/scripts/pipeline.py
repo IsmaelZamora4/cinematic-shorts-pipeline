@@ -880,9 +880,12 @@ def validate_config(data, config_path, captured_resources=None):
         ):
             errors.append("productive scene profile Stage 01 inputs must contain pipeline-config, storyboard, and all required resources only")
 
+        combined_candidate = _has_productive_combined_contract(data)
         for stage_id in (TTS_NARRATION_STAGE_ID, LEGACY_NARRATION_STAGE_ID,
                          "04-remotion-compose", "05-ffmpeg-finalize", "06-quality-control"):
             stage = by_id.get(stage_id)
+            if stage_id == TTS_NARRATION_STAGE_ID and combined_candidate:
+                continue
             if stage is not None and stage_id != "01-validate-project" and stage.get("adapter_status") != "pending":
                 errors.append(f"productive scene profile requires {stage_id}.adapter_status to remain pending")
 
@@ -928,10 +931,13 @@ def validate_config(data, config_path, captured_resources=None):
             kokoro_tool = tool_by_id.get("kokoro", {})
             if kokoro_tool.get("version_requirement") != "kokoro-onnx==0.6.1; Python>=3.10,<3.14; CPUExecutionProvider":
                 errors.append("productive Kokoro tool version_requirement must declare the supported runtime contract")
+            combined_candidate = _has_productive_combined_contract(data)
             for audiovisual_stage_id in (
                 "02-blender-scenes", "04-remotion-compose", "05-ffmpeg-finalize", "06-quality-control",
             ):
                 audiovisual_stage = by_id.get(audiovisual_stage_id, {})
+                if audiovisual_stage_id == "02-blender-scenes" and combined_candidate:
+                    continue
                 if audiovisual_stage.get("adapter_status") != "pending":
                     errors.append(f"productive profile requires {audiovisual_stage_id}.adapter_status to remain pending")
         script_path = project_resource_paths.get(VOICEOVER_SCRIPT_ID)
@@ -2325,9 +2331,123 @@ def _is_productive_scenes_config(config):
         if blender is None or blender.get("adapter_status") != "implemented" or blender.get("availability") != "verified":
             return False
     return all(
-        stage_id == "01-validate-project" or stage.get("adapter_status") == "pending"
-        for stage_id, stage in by_id.items() if stage_id != "02-blender-scenes"
+        stage_id in {"01-validate-project", "02-blender-scenes"}
+        or (stage_id == TTS_NARRATION_STAGE_ID and _has_productive_combined_contract(config))
+        or stage.get("adapter_status") == "pending"
+        for stage_id, stage in by_id.items()
     )
+
+
+def _has_productive_combined_contract(config):
+    """Recognize the complete 5C.2 declaration; this does not authorize Stage 04."""
+    by_id = {
+        stage.get("id"): stage for stage in config.get("stages", [])
+        if isinstance(stage, dict) and isinstance(stage.get("id"), str)
+    }
+    stage01 = by_id.get("01-validate-project", {})
+    stage02 = by_id.get("02-blender-scenes", {})
+    stage03 = by_id.get(TTS_NARRATION_STAGE_ID, {})
+    stage04 = by_id.get("04-remotion-compose", {})
+    if not (
+        _is_productive_scenes_config_shallow(config)
+        and _is_productive_tts_contract_shallow(config)
+        and stage01.get("adapter_status") == "implemented"
+        and stage02.get("adapter_status") == "implemented"
+        and stage03.get("adapter_status") == "implemented"
+        and stage04.get("adapter_status") == "pending"
+    ):
+        return False
+    for stage_id in ("05-ffmpeg-finalize", "06-quality-control"):
+        if by_id.get(stage_id, {}).get("adapter_status") != "pending":
+            return False
+    blender = next((item for item in config.get("tools", []) if isinstance(item, dict) and item.get("id") == "blender"), {})
+    kokoro = next((item for item in config.get("tools", []) if isinstance(item, dict) and item.get("id") == "kokoro"), {})
+    return (
+        blender.get("availability") == "verified" and blender.get("adapter_status") == "implemented"
+        and kokoro.get("availability") == "verified" and kokoro.get("adapter_status") == "implemented"
+    )
+
+
+def _is_productive_scenes_config_shallow(config):
+    """Scene contract without downstream-state classification."""
+    stages = config.get("stages", [])
+    by_id = {item.get("id"): item for item in stages if isinstance(item, dict)}
+    stage01, stage02 = by_id.get("01-validate-project", {}), by_id.get("02-blender-scenes", {})
+    resources = config.get("project", {}).get("resources", []) if isinstance(config.get("project"), dict) else []
+    specs = [item for item in resources if isinstance(item, dict) and item.get("kind") == "blender-scene-spec"]
+    profile = config.get("profile", {})
+    validation_inputs, scene_inputs = stage01.get("inputs", []), stage02.get("inputs", [])
+    outputs = stage02.get("outputs", [])
+    return (
+        _intends_productive_scenes_config(config)
+        and len(specs) == 1 and specs[0].get("required") is True
+        and stage01.get("adapter") == "builtin-validation"
+        and stage01.get("adapter_status") == "implemented"
+        and stage01.get("depends_on") == []
+        and isinstance(validation_inputs, list)
+        and set(validation_inputs) == {"pipeline-config", "storyboard"} | {
+            f"resource-{item.get('id')}" for item in resources if isinstance(item, dict) and item.get("required") is True
+        }
+        and len(validation_inputs) == len(set(validation_inputs))
+        and [item.get("id") for item in stage01.get("outputs", []) if isinstance(item, dict)] == ["validated-plan"]
+        and stage02.get("adapter") == "blender-scenes"
+        and stage02.get("depends_on") == ["01-validate-project"]
+        and stage02.get("tools") == ["blender"]
+        and stage02.get("adapter_status") == "implemented"
+        and isinstance(scene_inputs, list)
+        and set(scene_inputs) == {"storyboard", "validated-plan", f"resource-{specs[0].get('id')}"}
+        and len(scene_inputs) == 3
+        and isinstance(outputs, list) and len(outputs) == 1
+        and outputs[0].get("id") == "scene-package"
+        and isinstance(outputs[0].get("path"), str)
+        and PurePosixPath(outputs[0]["path"]).suffix.lower() == ".zip"
+        and (profile.get("width"), profile.get("height"), profile.get("fps")) == (540, 960, 12)
+    )
+
+
+def _is_productive_tts_contract_shallow(config):
+    stages = config.get("stages", [])
+    by_id = {item.get("id"): item for item in stages if isinstance(item, dict)}
+    stage01 = by_id.get("01-validate-project", {})
+    stage03 = by_id.get(TTS_NARRATION_STAGE_ID, {})
+    tools = {item.get("id"): item for item in config.get("tools", []) if isinstance(item, dict)}
+    resources = config.get("project", {}).get("resources", []) if isinstance(config.get("project"), dict) else []
+    script_ids = [item.get("id") for item in resources if isinstance(item, dict) and item.get("kind") == "voiceover-script" and item.get("required") is True]
+    outputs = stage03.get("outputs", [])
+    tts = stage03.get("tts") if isinstance(stage03.get("tts"), dict) else {}
+    return (
+        len(script_ids) == 1 and stage01.get("adapter") == "builtin-validation"
+        and stage01.get("adapter_status") == "implemented"
+        and stage03.get("adapter") == "tts-narration"
+        and stage03.get("adapter_status") == "implemented"
+        and stage03.get("depends_on") == ["01-validate-project"]
+        and set(stage03.get("inputs", [])) == {f"resource-{script_ids[0]}", "validated-plan"}
+        and len(stage03.get("inputs", [])) == 2
+        and stage03.get("tools") == ["kokoro"]
+        and tts.get("provider") == "kokoro" and tts.get("voice") == KOKORO_VOICE
+        and tts.get("language") == KOKORO_LANGUAGE and tts.get("script_input") == VOICEOVER_SCRIPT_INPUT
+        and tts.get("audio") == KOKORO_AUDIO
+        and isinstance(outputs, list)
+        and {item.get("id") for item in outputs if isinstance(item, dict)} == {"narration", "narration-provenance"}
+        and len(outputs) == 2
+        and tools.get("kokoro", {}).get("availability") == "verified"
+        and tools.get("kokoro", {}).get("adapter_status") == "implemented"
+        and tools.get("kokoro", {}).get("version_requirement") == "kokoro-onnx==0.6.1; Python>=3.10,<3.14; CPUExecutionProvider"
+    )
+
+
+def _classify_productive_profile(config):
+    """Return one complete productive profile, or None for ambiguous declarations."""
+    combined = _has_productive_combined_contract(config)
+    tts = _is_productive_tts_config(config)
+    scenes = _is_productive_scenes_config(config)
+    if combined:
+        return "audiovisual-combined"
+    if tts and _is_productive_tts_contract_shallow(config) and not scenes:
+        return "kokoro-independent"
+    if scenes and not tts:
+        return "blender-independent"
+    return None
 
 
 def _productive_paths(root, stage):
@@ -3006,16 +3126,17 @@ def validate_manifest(manifest, config, config_path, manifest_path):
                     errors.append(f"{label}.stage_fingerprint is stale for current config, inputs, or tool versions")
     productive_tts = _is_productive_tts_config(config)
     productive_scenes = _is_productive_scenes_config(config)
+    combined_profile = _classify_productive_profile(config) == "audiovisual-combined"
     if productive_tts or productive_scenes:
         pending_stage_ids = {"04-remotion-compose", "05-ffmpeg-finalize", "06-quality-control"}
-        if productive_tts or configured["02-blender-scenes"]["adapter_status"] == "pending":
+        if not combined_profile and (productive_tts or configured["02-blender-scenes"]["adapter_status"] == "pending"):
             pending_stage_ids.add("02-blender-scenes")
-        if productive_scenes:
+        if productive_scenes and not combined_profile:
             pending_stage_ids.update(NARRATION_STAGE_IDS.intersection(configured))
         for stage_id in pending_stage_ids:
             entry = stage_entries.get(stage_id)
             if isinstance(entry, dict) and entry.get("status") != "pending":
-                profile_name = "productive TTS" if productive_tts else "productive scenes"
+                profile_name = "audiovisual combined" if combined_profile else "productive TTS" if productive_tts else "productive scenes"
                 errors.append(f"manifest.stages.{stage_id} must remain pending in the {profile_name} profile")
 
         validation_entry = stage_entries.get("01-validate-project")
@@ -3054,6 +3175,41 @@ def validate_manifest(manifest, config, config_path, manifest_path):
                     validate_scene_package(stream, expected_context=context)
             except (KeyError, StopIteration, TypeError, OSError, ValueError) as exc:
                 errors.append(f"manifest scene-package does not match current project context: {exc}")
+        narration_entry = stage_entries.get(TTS_NARRATION_STAGE_ID)
+        if combined_profile and isinstance(narration_entry, dict) and narration_entry.get("status") == "completed":
+            try:
+                artifacts = {item["id"]: item for item in narration_entry["artifacts"]}
+                wav_artifact = artifacts["narration"]
+                provenance_artifact = artifacts["narration-provenance"]
+                wav_path = _path(root, wav_artifact["path"], "manifest narration WAV path", errors, required_file=True)
+                provenance_path = _path(root, provenance_artifact["path"], "manifest narration provenance path", errors, required_file=True)
+                if wav_path is None or provenance_path is None:
+                    raise ValueError("narration outputs are missing")
+                if wav_path.stat().st_size > MAX_KOKORO_WAV_BYTES or provenance_path.stat().st_size > MAX_KOKORO_PROVENANCE_BYTES:
+                    raise ValueError("narration output exceeds its size limit")
+                wav_bytes = wav_path.read_bytes()
+                audio = _inspect_kokoro_wav(wav_bytes)
+                provenance = _strict_load(provenance_path)
+                if (
+                    not isinstance(provenance, dict)
+                    or provenance.get("provenance_version") != 1
+                    or provenance.get("record_type") != "productive-local-kokoro-tts"
+                    or provenance.get("run_id") != manifest.get("run_id")
+                    or provenance.get("project_id") != manifest.get("project_id")
+                    or provenance.get("dag_stage_id") != TTS_NARRATION_STAGE_ID
+                    or provenance.get("provider") != "kokoro-onnx"
+                    or provenance.get("voice") != KOKORO_VOICE
+                    or provenance.get("language") != KOKORO_LANGUAGE
+                    or provenance.get("audio") != audio
+                    or provenance.get("hashes", {}).get("wav_sha256") != hashlib.sha256(wav_bytes).hexdigest()
+                    or provenance.get("hashes", {}).get("wav_sha256") != wav_artifact.get("sha256")
+                    or provenance.get("hashes", {}).get("validated_plan_sha256") is None
+                    or provenance.get("attempts") != 1
+                    or provenance.get("automatic_retries") is not False
+                ):
+                    raise ValueError("Kokoro provenance does not match the manifest, WAV, or productive contract")
+            except (KeyError, TypeError, OSError, ValueError) as exc:
+                errors.append(f"manifest narration does not match Kokoro provenance: {exc}")
     return errors, warnings
 
 
