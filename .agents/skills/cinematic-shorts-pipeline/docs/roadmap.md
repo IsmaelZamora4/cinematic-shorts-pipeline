@@ -134,6 +134,8 @@ El plan original proponía integrar el piloto Kokoro al DAG con persistencia/hue
 
 Los runners productivos independientes cubren Stage 01/03 Kokoro y Stage 01/02 Blender. No existe un perfil que los ejecute juntos, ni composición Remotion, finalización FFmpeg, QA audiovisual, alineador de subtítulos, descargador/verificador de licencias, retries, resume u orquestación audiovisual general. La rúbrica y benchmarks siguen siendo protocolos, no resultados medidos. La generación completa de cortos verticales no está implementada.
 
+Propuesta Phase 5C.1 para auditoría, sin implementación: [diseño de composición productiva Remotion](remotion-productive-composition-design.md).
+
 ## v0.10 — Phase 5A: Blender Productive Adapter Architecture (completada)
 
 - El diseño documental aprobado define cómo integrar productivamente Blender en Stage 02, preservando Phase 4B, `pipeline_version: 1`, `manifest_version: 1` y sus fingerprints.
