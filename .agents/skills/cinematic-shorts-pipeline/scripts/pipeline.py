@@ -65,6 +65,34 @@ MAX_BLENDER_SCENE_SPEC_BYTES = 64 * 1024
 MAX_BLENDER_PREFLIGHT_OUTPUT_BYTES = 16 * 1024
 MAX_BLENDER_WORKER_REQUEST_BYTES = 128 * 1024
 MAX_BLENDER_WORKER_RESPONSE_BYTES = 64 * 1024
+REMOTION_WIDTH = 540
+REMOTION_HEIGHT = 960
+REMOTION_FPS = 12
+REMOTION_FRAME_COUNT = 24
+REMOTION_SAMPLE_RATE = 24000
+REMOTION_SAMPLES_PER_FRAME = REMOTION_SAMPLE_RATE // REMOTION_FPS
+REMOTION_MAX_SAMPLES = REMOTION_SAMPLES_PER_FRAME * REMOTION_FRAME_COUNT
+REMOTION_MAX_MP4_BYTES = 64 * 1024 * 1024
+REMOTION_MAX_WORKER_REQUEST_BYTES = 128 * 1024
+REMOTION_MAX_WORKER_RESPONSE_BYTES = 64 * 1024
+REMOTION_MAX_DEPENDENCY_MANIFEST_BYTES = 64 * 1024
+REMOTION_MAX_DEPENDENCY_LOCK_BYTES = 16 * 1024 * 1024
+REMOTION_MAX_WORKER_BYTES = 256 * 1024
+REMOTION_MAX_VERSION_OUTPUT_BYTES = 16 * 1024
+REMOTION_PREFLIGHT_TIMEOUT_SECONDS = 15
+REMOTION_WORKER_TIMEOUT_SECONDS = 10 * 60
+REMOTION_VERSION = "4.0.540"
+REMOTION_NODE_LTS_MAJORS = frozenset({22, 24, 26})
+REMOTION_STAGE04_INPUTS = (
+    "validated-plan", "storyboard", "scene-package", "narration", "narration-provenance",
+)
+REMOTION_STAGE04_OUTPUTS = ("composite", "composition-provenance")
+REMOTION_HASH_FIELDS = (
+    "node_sha256", "remotion_lock_sha256", "worker_sha256", "ffprobe_sha256",
+)
+REMOTION_HASH = re.compile(r"^[0-9a-f]{64}$")
+REMOTION_NODE_VERSION = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
+REMOTION_FFPROBE_VERSION = re.compile(r"(?m)^ffprobe version (\d+)\.(\d+)(?:\.(\d+))?(?:[-+ ].*)?$")
 BLENDER_PREFLIGHT_TIMEOUT_SECONDS = 15
 BLENDER_WORKER_TIMEOUT_SECONDS = 30 * 60
 BLENDER_TERMINATION_GRACE_SECONDS = 3
@@ -2038,6 +2066,468 @@ def _inspect_kokoro_wav(data):
         "severe_clipping_detected": False,
         "signal_non_silent": True,
     }
+
+
+def _validate_remotion_timeline(config, storyboard, wav_bytes, narration_provenance, *,
+                                run_id, project_id, validated_plan_sha256):
+    """Validate Phase 5C.4's fixed two-second clock without changing source media or text."""
+    profile = config.get("profile") if isinstance(config, dict) else None
+    if not isinstance(profile, dict) or any(
+        type(profile.get(key)) is not int or profile.get(key) != expected
+        for key, expected in {
+        "width": REMOTION_WIDTH, "height": REMOTION_HEIGHT, "fps": REMOTION_FPS,
+    }.items()) or profile.get("format") != "mp4":
+        raise ValueError("Remotion profile must be 540x960, 12 FPS, MP4")
+    if not isinstance(storyboard, dict) or any(
+        type(storyboard.get(key)) is not int or storyboard.get(key) != expected
+        for key, expected in {"fps": REMOTION_FPS, "total_frames": REMOTION_FRAME_COUNT}.items()
+    ):
+        raise ValueError("storyboard must define exactly 24 frames at 12 FPS")
+    storyboard_errors = STORYBOARD_VALIDATOR.validate(storyboard)
+    if storyboard_errors:
+        raise ValueError("storyboard is invalid for Remotion: " + "; ".join(storyboard_errors))
+
+    audio = _inspect_kokoro_wav(wav_bytes)
+    source_samples = audio["frames"]
+    if source_samples > REMOTION_MAX_SAMPLES:
+        raise ValueError("Kokoro WAV exceeds the 48,000-sample Remotion timeline")
+    voiceover = storyboard.get("voiceover")
+    duration_ms = voiceover.get("duration_ms") if isinstance(voiceover, dict) else None
+    expected_duration_ms = (source_samples * 1000 + REMOTION_SAMPLE_RATE - 1) // REMOTION_SAMPLE_RATE
+    if duration_ms != expected_duration_ms:
+        raise ValueError("storyboard voiceover.duration_ms does not match the measured WAV duration")
+
+    if not isinstance(narration_provenance, dict):
+        raise ValueError("Kokoro provenance must be an object")
+    hashes = narration_provenance.get("hashes")
+    if (
+        narration_provenance.get("provenance_version") != 1
+        or narration_provenance.get("record_type") != "productive-local-kokoro-tts"
+        or narration_provenance.get("run_id") != run_id
+        or narration_provenance.get("project_id") != project_id
+        or narration_provenance.get("dag_stage_id") != TTS_NARRATION_STAGE_ID
+        or narration_provenance.get("provider") != "kokoro-onnx"
+        or narration_provenance.get("audio") != KOKORO_AUDIO
+        or not isinstance(hashes, dict)
+        or hashes.get("wav_sha256") != hashlib.sha256(wav_bytes).hexdigest()
+        or hashes.get("validated_plan_sha256") != validated_plan_sha256
+    ):
+        raise ValueError("Kokoro provenance does not match this run, project, plan, or WAV")
+
+    timing = storyboard.get("narrative_timing")
+    captions = storyboard.get("captions", [])
+    if (captions or timing is not None) and (
+        not isinstance(timing, dict) or timing.get("clock_source") != "recording"
+    ):
+        raise ValueError("recorded narration captions and anchors require clock_source recording")
+    if isinstance(timing, dict) and any(
+        isinstance(anchor, dict)
+        and anchor.get("kind") in {"beat", "pause"}
+        and anchor.get("basis") not in {"measured", "manually_reviewed"}
+        for anchor in timing.get("anchors", []) if isinstance(timing.get("anchors"), list)
+    ):
+        raise ValueError("recorded narration anchors must be measured or manually_reviewed")
+
+    quantized = []
+    previous_captions = []
+    for index, cue in enumerate(captions):
+        start_ms, end_ms = cue["start_ms"], cue["end_ms"]
+        start_frame = start_ms * REMOTION_FPS // 1000
+        end_frame = (end_ms * REMOTION_FPS + 999) // 1000
+        if start_frame < 0 or end_frame > REMOTION_FRAME_COUNT or end_frame <= start_frame:
+            raise ValueError(f"captions[{index}] falls outside the two-second frame timeline")
+        previous_captions = [
+            earlier for earlier in previous_captions
+            if earlier["end_frame_exclusive"] > start_frame
+        ]
+        for earlier in previous_captions:
+            if start_frame < earlier["end_frame_exclusive"]:
+                raw_overlap = start_ms < earlier["end_ms"]
+                deliberate = isinstance(cue.get("overlap_exception"), str) and bool(cue["overlap_exception"].strip())
+                if not raw_overlap or not deliberate:
+                    raise ValueError(f"captions[{index}] has a quantization collision on the frame timeline")
+        item = {
+            "caption_index": index, "start_frame": start_frame,
+            "end_frame_exclusive": end_frame, "start_ms": start_ms, "end_ms": end_ms,
+            "text": cue["text"],
+        }
+        quantized.append(item)
+        previous_captions.append(item)
+
+    return {
+        "width": REMOTION_WIDTH, "height": REMOTION_HEIGHT, "fps": REMOTION_FPS,
+        "frame_count": REMOTION_FRAME_COUNT, "source_samples": source_samples,
+        "silence_samples": REMOTION_MAX_SAMPLES - source_samples,
+        "timeline_samples": REMOTION_MAX_SAMPLES, "captions": quantized,
+        "anchors": timing.get("anchors", []) if isinstance(timing, dict) else [],
+    }
+
+
+def _validate_remotion_input_context(run_id, project_id, validated_plan_sha256,
+                                     stage_01_fingerprint, stage_02_fingerprint,
+                                     scene_package_sha256, storyboard_sha256,
+                                     wav_bytes, scene_provenance, narration_provenance):
+    """Cross-bind the five future Stage 04 inputs to verified Stage 01/02/03 records."""
+    if not isinstance(scene_provenance, dict) or not isinstance(narration_provenance, dict):
+        raise ValueError("Remotion Stage 04 provenance inputs must be objects")
+    digests = (
+        validated_plan_sha256, stage_01_fingerprint, stage_02_fingerprint,
+        scene_package_sha256, storyboard_sha256,
+    )
+    if any(not isinstance(value, str) or not FINGERPRINT.fullmatch(value) for value in digests):
+        raise ValueError("Remotion Stage 04 input hashes must be lowercase SHA-256 values")
+    scene_inputs = scene_provenance.get("inputs") if isinstance(scene_provenance, dict) else None
+    scene_render = scene_provenance.get("render") if isinstance(scene_provenance, dict) else None
+    scene_timeline = scene_provenance.get("timeline") if isinstance(scene_provenance, dict) else None
+    raw_input_hashes = scene_inputs.get("input_hashes") if isinstance(scene_inputs, dict) else None
+    scene_input_hashes = {
+        item.get("id"): item.get("sha256") for item in raw_input_hashes
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    } if isinstance(raw_input_hashes, list) else {}
+    if (
+        scene_provenance.get("provenance_version") != 1
+        or scene_provenance.get("record_type") != "productive-local-blender-scenes"
+        or scene_provenance.get("run_id") != run_id
+        or scene_provenance.get("project_id") != project_id
+        or scene_provenance.get("stage_id") != "02-blender-scenes"
+        or not isinstance(scene_inputs, dict)
+        or scene_inputs.get("validated_plan_sha256") != validated_plan_sha256
+        or scene_inputs.get("stage_01_fingerprint") != stage_01_fingerprint
+        or scene_inputs.get("stage_02_fingerprint") != stage_02_fingerprint
+        or not isinstance(raw_input_hashes, list)
+        or len(scene_input_hashes) != len(raw_input_hashes)
+        or scene_input_hashes.get("validated-plan") != validated_plan_sha256
+        or scene_input_hashes.get("storyboard") != storyboard_sha256
+        or any(not isinstance(value, str) or not FINGERPRINT.fullmatch(value)
+               for value in scene_input_hashes.values())
+        or not isinstance(scene_render, dict)
+        or any(scene_render.get(key) != expected for key, expected in {
+            "width": REMOTION_WIDTH, "height": REMOTION_HEIGHT, "fps_num": REMOTION_FPS,
+            "fps_den": 1, "source_start_frame": 0,
+            "source_end_frame_exclusive": REMOTION_FRAME_COUNT,
+            "image_format": "PNG_RGB8_SRGB",
+        }.items())
+        or not isinstance(scene_timeline, (dict, type(None)))
+    ):
+        raise ValueError("Blender scene-package provenance does not match this run, project, or plan")
+    if isinstance(scene_timeline, dict) and any(scene_timeline.get(key) != expected for key, expected in {
+        "source_start_frame": 0, "source_end_frame_exclusive": REMOTION_FRAME_COUNT,
+        "fps_num": REMOTION_FPS, "fps_den": 1, "frame_count": REMOTION_FRAME_COUNT,
+    }.items()):
+        raise ValueError("Blender scene-package timeline does not match the Remotion frame contract")
+    wav_hash = hashlib.sha256(wav_bytes).hexdigest() if isinstance(wav_bytes, bytes) else None
+    narration_hashes = narration_provenance.get("hashes") if isinstance(narration_provenance, dict) else None
+    if (
+        narration_provenance.get("run_id") != run_id
+        or narration_provenance.get("project_id") != project_id
+        or not isinstance(narration_hashes, dict)
+        or narration_hashes.get("validated_plan_sha256") != validated_plan_sha256
+        or narration_hashes.get("wav_sha256") != wav_hash
+    ):
+        raise ValueError("Kokoro narration provenance does not match this run, project, plan, or WAV")
+    return {
+        "input_ids": list(REMOTION_STAGE04_INPUTS),
+        "output_ids": list(REMOTION_STAGE04_OUTPUTS),
+        "validated_plan_sha256": validated_plan_sha256,
+        "storyboard_sha256": storyboard_sha256,
+        "scene_package_sha256": scene_package_sha256,
+        "narration_sha256": wav_hash,
+    }
+
+
+def _validate_remotion_relative_path(value, label):
+    if not isinstance(value, str) or not value or "\\" in value:
+        raise ValueError(f"{label} must be a safe project-relative POSIX path")
+    path = PurePosixPath(value)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        raise ValueError(f"{label} must be a safe project-relative POSIX path")
+    return value
+
+
+def _validate_remotion_worker_request(data):
+    if not isinstance(data, bytes) or len(data) > REMOTION_MAX_WORKER_REQUEST_BYTES:
+        raise ValueError(f"Remotion worker request exceeds maximum size of {REMOTION_MAX_WORKER_REQUEST_BYTES} bytes")
+    try:
+        request = STORYBOARD_VALIDATOR.parse_json(data.decode("utf-8", errors="strict"))
+    except (UnicodeError, ValueError) as exc:
+        raise ValueError("Remotion worker request must be strict valid UTF-8 JSON") from exc
+    fields = {
+        "record_type", "request_version", "project_id", "run_id", "width", "height", "fps",
+        "frames", "source_samples", "silence_samples", "inputs", "captions", "anchors",
+    }
+    if not isinstance(request, dict) or set(request) != fields:
+        raise ValueError("Remotion worker request has missing or unknown fields")
+    if (
+        request["record_type"] != "remotion-worker-request"
+        or type(request["request_version"]) is not int or request["request_version"] != 1
+        or not isinstance(request["project_id"], str) or not request["project_id"].strip()
+        or not isinstance(request["run_id"], str) or not request["run_id"].strip()
+        or any(type(request[key]) is not int for key in ("width", "height", "fps", "frames", "source_samples", "silence_samples"))
+        or (request["width"], request["height"], request["fps"], request["frames"])
+        != (REMOTION_WIDTH, REMOTION_HEIGHT, REMOTION_FPS, REMOTION_FRAME_COUNT)
+        or not 1 <= request["source_samples"] <= REMOTION_MAX_SAMPLES
+        or request["silence_samples"] != REMOTION_MAX_SAMPLES - request["source_samples"]
+    ):
+        raise ValueError("Remotion worker request does not match the fixed timeline contract")
+    expected_inputs = {
+        "validated-plan": "validated-plan.json", "storyboard": "storyboard.json",
+        "scene-package": "scene-package.zip", "narration": "narration.wav",
+        "narration-provenance": "narration-provenance.json",
+    }
+    if request["inputs"] != expected_inputs:
+        raise ValueError("Remotion worker request must declare the exact staged input set")
+    if not isinstance(request["captions"], list) or not isinstance(request["anchors"], list):
+        raise ValueError("Remotion worker captions and anchors must be arrays")
+    for index, cue in enumerate(request["captions"]):
+        if not isinstance(cue, dict) or set(cue) != {
+            "caption_index", "start_frame", "end_frame_exclusive", "start_ms", "end_ms", "text",
+        } or any(type(cue[key]) is not int for key in (
+            "caption_index", "start_frame", "end_frame_exclusive", "start_ms", "end_ms",
+        )) or cue["caption_index"] != index or not (
+            0 <= cue["start_frame"] < cue["end_frame_exclusive"] <= REMOTION_FRAME_COUNT
+        ) or not (
+            0 <= cue["start_ms"] < cue["end_ms"] <= 2000
+            and cue["start_frame"] == cue["start_ms"] * REMOTION_FPS // 1000
+            and cue["end_frame_exclusive"] == (cue["end_ms"] * REMOTION_FPS + 999) // 1000
+        ) or not isinstance(cue["text"], str) or not cue["text"].strip():
+            raise ValueError(f"Remotion worker request caption {index} is malformed")
+    anchor_fields = {"id", "scene_id", "kind", "start_ms", "end_ms", "basis"}
+    for index, anchor in enumerate(request["anchors"]):
+        if not isinstance(anchor, dict) or set(anchor) != anchor_fields:
+            raise ValueError(f"Remotion worker request anchor {index} has missing or unknown fields")
+        if (
+            not isinstance(anchor["id"], str) or not anchor["id"].strip()
+            or not isinstance(anchor["scene_id"], str) or not anchor["scene_id"].strip()
+            or not isinstance(anchor["kind"], str) or anchor["kind"] not in {"beat", "pause", "cut"}
+            or not isinstance(anchor["basis"], str) or anchor["basis"] not in {"measured", "manually_reviewed"}
+            or type(anchor["start_ms"]) is not int or type(anchor["end_ms"]) is not int
+            or not 0 <= anchor["start_ms"] <= anchor["end_ms"] <= 2000
+            or (anchor["kind"] == "cut" and anchor["start_ms"] != anchor["end_ms"])
+            or (anchor["kind"] != "cut" and anchor["end_ms"] <= anchor["start_ms"])
+        ):
+            raise ValueError(f"Remotion worker request anchor {index} is malformed")
+    return request
+
+
+def _validate_remotion_worker_response(data, expected_run_id):
+    if not isinstance(data, bytes) or len(data) > REMOTION_MAX_WORKER_RESPONSE_BYTES:
+        raise ValueError(f"Remotion worker response exceeds maximum size of {REMOTION_MAX_WORKER_RESPONSE_BYTES} bytes")
+    try:
+        response = STORYBOARD_VALIDATOR.parse_json(data.decode("utf-8", errors="strict"))
+    except (UnicodeError, ValueError) as exc:
+        raise ValueError("Remotion worker response must be strict valid UTF-8 JSON") from exc
+    fields = {
+        "record_type", "response_version", "run_id", "success", "frames_rendered",
+        "output_path", "output_size_bytes", "output_sha256",
+    }
+    if not isinstance(response, dict) or set(response) != fields:
+        raise ValueError("Remotion worker response has missing or unknown fields")
+    if (
+        response["record_type"] != "remotion-worker-result"
+        or type(response["response_version"]) is not int or response["response_version"] != 1
+        or response["run_id"] != expected_run_id
+        or response["success"] is not True
+        or type(response["frames_rendered"]) is not int or response["frames_rendered"] != REMOTION_FRAME_COUNT
+        or response["output_path"] != "composite.mp4"
+        or type(response["output_size_bytes"]) is not int
+        or not 1 <= response["output_size_bytes"] <= REMOTION_MAX_MP4_BYTES
+        or not isinstance(response["output_sha256"], str) or not REMOTION_HASH.fullmatch(response["output_sha256"])
+    ):
+        raise ValueError("Remotion worker response does not match the fixed run/output contract")
+    return response
+
+
+def _validate_remotion_runtime_identity(identity):
+    fields = {
+        "node_version", "remotion_version", "ffprobe_version", *REMOTION_HASH_FIELDS,
+    }
+    if not isinstance(identity, dict) or set(identity) != fields:
+        raise ValueError("Remotion runtime identity has missing or unknown fields")
+    node_version = identity["node_version"]
+    match = REMOTION_NODE_VERSION.fullmatch(node_version) if isinstance(node_version, str) else None
+    if match is None or int(match.group(1)) not in REMOTION_NODE_LTS_MAJORS:
+        raise ValueError("Node runtime must be an explicitly verified Node.js 22, 24, or 26 LTS release")
+    if identity["remotion_version"] != REMOTION_VERSION:
+        raise ValueError(f"Remotion version must match the pinned {REMOTION_VERSION} worker contract")
+    ffprobe_version = identity["ffprobe_version"]
+    match = REMOTION_FFPROBE_VERSION.fullmatch(
+        "ffprobe version " + ffprobe_version if isinstance(ffprobe_version, str) else ""
+    )
+    if match is None or tuple(int(part or 0) for part in match.groups()) < (4, 1, 0):
+        raise ValueError("ffprobe version must be 4.1.0 or later")
+    for field in REMOTION_HASH_FIELDS:
+        if not isinstance(identity[field], str) or not REMOTION_HASH.fullmatch(identity[field]):
+            raise ValueError(f"Remotion runtime {field} must be a lowercase SHA-256")
+    return identity
+
+
+def _validate_remotion_dependency_contract(package_bytes, lock_bytes):
+    if (
+        not isinstance(package_bytes, bytes) or len(package_bytes) > REMOTION_MAX_DEPENDENCY_MANIFEST_BYTES
+        or not isinstance(lock_bytes, bytes) or len(lock_bytes) > REMOTION_MAX_DEPENDENCY_LOCK_BYTES
+    ):
+        raise ValueError("Remotion dependency manifest or lockfile exceeds its size limit")
+    try:
+        package = STORYBOARD_VALIDATOR.parse_json(package_bytes.decode("utf-8", errors="strict"))
+        lock = STORYBOARD_VALIDATOR.parse_json(lock_bytes.decode("utf-8", errors="strict"))
+    except (UnicodeError, ValueError) as exc:
+        raise ValueError("Remotion dependency manifest and lockfile must be strict UTF-8 JSON") from exc
+    expected_dependencies = {
+        "@remotion/bundler": REMOTION_VERSION,
+        "@remotion/renderer": REMOTION_VERSION,
+        "react": "19.3.1", "react-dom": "19.3.1", "remotion": REMOTION_VERSION,
+    }
+    if (
+        not isinstance(package, dict) or package.get("name") != "cinematic-remotion-worker"
+        or package.get("private") is not True or package.get("type") != "module"
+        or package.get("engines") != {"node": ">=22 <27"}
+        or package.get("dependencies") != expected_dependencies
+        or any(field in package for field in ("scripts", "bin", "imports"))
+    ):
+        raise ValueError("Remotion package manifest does not match the fixed dependency contract")
+    if (
+        not isinstance(lock, dict) or lock.get("name") != package["name"]
+        or lock.get("lockfileVersion") != 3 or lock.get("requires") is not True
+        or not isinstance(lock.get("packages"), dict)
+    ):
+        raise ValueError("Remotion lockfile must be npm lockfileVersion 3 for the fixed worker")
+    lock_root = lock["packages"].get("")
+    if not isinstance(lock_root, dict) or lock_root.get("dependencies") != expected_dependencies:
+        raise ValueError("Remotion lockfile root dependencies do not match package.json")
+    for name, version in expected_dependencies.items():
+        locked = lock["packages"].get("node_modules/" + name)
+        if not isinstance(locked, dict) or locked.get("version") != version:
+            raise ValueError(f"Remotion lockfile does not pin {name} to {version}")
+    for name, entry in lock["packages"].items():
+        if name and (not isinstance(entry, dict) or not isinstance(entry.get("version"), str)):
+            raise ValueError(f"Remotion lockfile package entry is malformed: {name}")
+        resolved = entry.get("resolved", "") if name else ""
+        if name and not isinstance(resolved, str):
+            raise ValueError(f"Remotion lockfile package URL is malformed: {name}")
+        if name and resolved and not resolved.startswith("https://registry.npmjs.org/"):
+            raise ValueError(f"Remotion lockfile package uses a non-registry source: {name}")
+        if name and resolved:
+            if not isinstance(entry.get("integrity"), str) or not entry["integrity"].startswith(("sha512-", "sha1-")):
+                raise ValueError(f"Remotion lockfile package lacks registry integrity: {name}")
+    return package, lock
+
+
+def _run_remotion_version_probe(executable, argument, cwd):
+    """Run only a fixed version flag, bounding captured output and wall time."""
+    options = {
+        "stdin": subprocess.DEVNULL, "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT,
+        "shell": False, "cwd": cwd,
+    }
+    if os.name == "nt":
+        options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+    else:
+        options["start_new_session"] = True
+    try:
+        process = subprocess.Popen([str(executable), argument], **options)
+    except OSError as exc:
+        raise ValueError(f"Remotion runtime version probe could not start: {exc}") from exc
+    output = bytearray()
+    overflow = threading.Event()
+
+    def read_output():
+        while True:
+            chunk = process.stdout.read(4096)
+            if not chunk:
+                return
+            if len(output) + len(chunk) > REMOTION_MAX_VERSION_OUTPUT_BYTES:
+                overflow.set()
+                return
+            output.extend(chunk)
+
+    reader = threading.Thread(target=read_output, name="remotion-version-output", daemon=True)
+    reader.start()
+    deadline = time.monotonic() + REMOTION_PREFLIGHT_TIMEOUT_SECONDS
+    while process.poll() is None and not overflow.is_set() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    if overflow.is_set() or process.poll() is None:
+        process.kill()
+        process.wait()
+        reader.join(timeout=1)
+        if overflow.is_set():
+            raise ValueError(f"Remotion runtime version output exceeds {REMOTION_MAX_VERSION_OUTPUT_BYTES} bytes")
+        raise ValueError(f"Remotion runtime version probe exceeded {REMOTION_PREFLIGHT_TIMEOUT_SECONDS} seconds")
+    reader.join(timeout=1)
+    if reader.is_alive() or process.returncode != 0:
+        raise ValueError("Remotion runtime version probe failed")
+    try:
+        return output.decode("utf-8", errors="strict")
+    except UnicodeError as exc:
+        raise ValueError("Remotion runtime version output is not UTF-8") from exc
+
+
+def _preflight_remotion_runtime(node_path, ffprobe_path, package_path, lock_path, worker_path):
+    """Hash fixed local inputs, verify the lock, and probe only Node/ffprobe versions."""
+    node_path = Path(node_path)
+    ffprobe_path = Path(ffprobe_path)
+    package_path = Path(package_path)
+    lock_path = Path(lock_path)
+    worker_path = Path(worker_path)
+    node_path, node_sha256, _ = _hash_local_runtime_file(node_path, "Node runtime", 1024 * 1024 * 1024)
+    ffprobe_path, ffprobe_sha256, _ = _hash_local_runtime_file(ffprobe_path, "ffprobe runtime", 1024 * 1024 * 1024)
+    package_path, package_sha256, _ = _hash_local_runtime_file(
+        package_path, "Remotion package manifest", REMOTION_MAX_DEPENDENCY_MANIFEST_BYTES,
+    )
+    lock_path, lock_sha256, _ = _hash_local_runtime_file(
+        lock_path, "Remotion dependency lockfile", REMOTION_MAX_DEPENDENCY_LOCK_BYTES,
+    )
+    worker_path, worker_sha256, _ = _hash_local_runtime_file(worker_path, "Remotion worker", REMOTION_MAX_WORKER_BYTES)
+    package_bytes = _read_bounded_regular_file(
+        package_path, REMOTION_MAX_DEPENDENCY_MANIFEST_BYTES, "Remotion package manifest", require_identity=True,
+    )
+    lock_bytes = _read_bounded_regular_file(
+        lock_path, REMOTION_MAX_DEPENDENCY_LOCK_BYTES, "Remotion dependency lockfile", require_identity=True,
+    )
+    if (
+        hashlib.sha256(package_bytes).hexdigest() != package_sha256
+        or hashlib.sha256(lock_bytes).hexdigest() != lock_sha256
+    ):
+        raise ValueError("Remotion package manifest or lockfile changed after hashing")
+    package, _ = _validate_remotion_dependency_contract(package_bytes, lock_bytes)
+    node_output = _run_remotion_version_probe(node_path, "--version", package_path.parent)
+    ffprobe_output = _run_remotion_version_probe(ffprobe_path, "-version", package_path.parent)
+    node_lines = [line.strip() for line in node_output.splitlines() if line.strip()]
+    ffprobe_matches = list(REMOTION_FFPROBE_VERSION.finditer(ffprobe_output))
+    if len(node_lines) != 1 or len(ffprobe_matches) != 1:
+        raise ValueError("Node and ffprobe version output must each contain one recognized version")
+    ffprobe_match = ffprobe_matches[0]
+    ffprobe_version = ".".join(str(int(part or 0)) for part in ffprobe_match.groups())
+    identity = {
+        "node_version": node_lines[0],
+        "remotion_version": package["dependencies"]["remotion"],
+        "ffprobe_version": ffprobe_version,
+        "node_sha256": node_sha256,
+        "remotion_lock_sha256": lock_sha256,
+        "worker_sha256": worker_sha256,
+        "ffprobe_sha256": ffprobe_sha256,
+    }
+    return _validate_remotion_runtime_identity(identity)
+
+
+def _validate_remotion_runtime_path(value, label):
+    path, _, _ = _hash_local_runtime_file(value, label, 1024 * 1024 * 1024)
+    return path
+
+
+def _create_remotion_staging(project_root, run_id):
+    if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id):
+        raise ValueError("Remotion staging run_id is invalid")
+    parent = _ensure_project_output_directory(project_root, (".pipeline", "work", "remotion-staging"))
+    for _ in range(3):
+        destination = parent / f"run-{run_id}-{uuid.uuid4().hex}"
+        try:
+            os.mkdir(destination, 0o700)
+        except FileExistsError:
+            continue
+        entry = _inspect_path(destination)
+        if entry is None or not stat.S_ISDIR(entry.st_mode) or _file_identity(entry) is None:
+            raise ValueError("could not establish an exclusive Remotion staging directory")
+        return destination
+    raise ValueError("could not allocate an exclusive Remotion staging directory")
 
 
 def _verify_kokoro_publication(run_dir, provenance, owned_files):

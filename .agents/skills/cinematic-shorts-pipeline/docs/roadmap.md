@@ -222,3 +222,11 @@ Diseño aprobado de Phase 5C.1 e integrado mediante PR #27: [diseño de composic
 - El MVP admite hasta 48 000 muestras PCM a 24 kHz (dos segundos a 12 FPS/24 frames). Audio más largo detiene Stage 02 y conserva los checkpoints verificados de Stage 01/03; no se recorta ni retimea el WAV.
 - Debido a la validación vigente del manifiesto combinado, Stage 04/05/06 se mantienen `pending`, incluso si falla una etapa anterior. Se registra el fallo en Stage 01/02/03 correspondiente; no se usa Stage 04 `blocked` descrito en algunos ejemplos del diseño aprobado. La modificación del esquema queda fuera de 5C.3.
 - Phase 5C.3 no implementa Remotion, FFmpeg ni QA y no ejecuta motores reales durante CI. Requiere auditoría independiente antes del merge.
+
+## v0.10 — Phase 5C.4: Remotion Contract & Runtime Preflight
+
+- Contrato temporal fijo en 540×960, 12 FPS, 24 frames, PCM16 mono a 24 kHz y máximo 48 000 muestras. Menos muestras declaran silencio final entero sin tocar el WAV; más muestras se rechazan.
+- Validación determinista de duración, captions, cuantización por frame, colisiones y anchors `clock_source: recording`; texto y tiempos no se inventan ni modifican.
+- Se añaden verificaciones de provenance/hash/contexto para las entradas Stage 04 de un mismo run, schemas cerrados de request/response y staging exclusivo. `validate-manifest` existente y los perfiles legacy permanecen intactos.
+- Preflight de rutas absolutas Node/ffprobe, reparse/symlink, versiones y hashes. Paquetes exactos en `workers/remotion/`; lock npm v3 generado offline con caché, sin instalar paquetes. Versiones observadas localmente: Node 24.16.0, Remotion 4.0.540, React/React DOM 19.3.1 y ffprobe 9.0.2.
+- Esta fase no habilita ni ejecuta Stage 04; Stage 04/05/06 continúan `pending`. No se compone, publica MP4 ni se ejecutan motores de medios reales. Ver [diseño Phase 5C.4](remotion-productive-composition-design.md#phase-5c4--contrato-y-preflight-implementado-en-rama-pendiente-de-auditoría).
