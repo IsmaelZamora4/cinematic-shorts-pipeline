@@ -1,6 +1,6 @@
 # Phase 5C.1 — diseño de composición audiovisual productiva
 
-**Estado:** propuesta documental para auditoría independiente. No implementada.
+**Estado:** arquitectura Phase 5C.1 aprobada e integrada; implementación dividida por fases incrementales.
 **Base de diseño:** `pipeline_version: 1`, `manifest_version: 1`, Scene Spec v1 y algoritmo de fingerprints vigentes.
 
 ## 1. Objetivo y límites
@@ -40,6 +40,8 @@ El Stage 01 `validated-plan` y `config_fingerprint` describen la configuración 
 Comando previsto: `run-productive-composition CONFIG --python ABSOLUTE_PATH --model ABSOLUTE_PATH --voices ABSOLUTE_PATH --blender ABSOLUTE_PATH --node ABSOLUTE_PATH --ffprobe ABSOLUTE_PATH`. Rutas runtime explícitas; cada proceso usa worker fijo. Los comandos independientes no cambian.
 
 ## 4. Ejecución y checkpoints
+
+**Ajuste de implementación para Phase 5C.3:** el validador de manifiestos v1 del perfil combinado exige Stage 04/05/06 `pending`. Por ello, este incremento registra los fallos en la etapa que los experimenta y conserva Stage 04 `pending`, aunque algunos casos de fallo abajo indiquen Stage 04 `blocked`. No se amplía ni relaja el contrato v1.
 
 Aunque Stage 02 y 03 solo dependan de Stage 01 en el DAG actual, ejecutarlos en este orden serial:
 
