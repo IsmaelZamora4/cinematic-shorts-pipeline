@@ -180,3 +180,18 @@ Cada PR conserva solo su alcance y no se mezcla con el siguiente. Si un gate fal
 - El lockfile es reproducible y cerrado, pero su instalación y ejecución multiplataforma quedan para el gate de dependencias/runtime de Phase 5C.5. El staging Worker/Remotion fijo todavía no renderiza; esta fase no habilita Stage 04.
 
 Fuentes oficiales consultadas para Phase 5C.4: [Remotion system requirements](https://www.remotion.dev/docs), [Remotion version mismatch](https://www.remotion.dev/docs/miscellaneous/version-mismatch), [Remotion React 19](https://www.remotion.dev/docs/react-19), [Node.js release support](https://nodejs.org/en/about/previous-releases), [ffprobe](https://ffmpeg.org/ffprobe.html).
+
+## Phase 5C.5 — composición y publicación Stage 04
+
+**Estado de implementación:** completo en rama Phase 5C.5; pendiente de CI y auditoría independiente. No mergear ni ejecutar el gate real hasta autorización posterior.
+
+- El runner combinado habilita Stage 04 solo con el perfil exacto y exige `--node`/`--ffprobe` absolutos. Orden efectivo: Stage 01 → Stage 03 Kokoro → validación de audio/duración → Stage 02 Blender → Stage 04 Remotion. Los runners TTS y Blender independientes no cambian.
+- `workers/remotion/` tiene worker MJS fijo, raíz de composición y lock npm v3: Remotion/bundler/renderer 4.0.540, React/React DOM 19.3.1. Acepta únicamente los cinco nombres fijos en staging. Renderiza 24 PNG y narration WAV padded en staging, sin evaluar código de usuario, importar el `.blend`, usar `eval` ni decidir publicación.
+- Stage 04 ejecuta ffprobe en el padre, valida MP4 H.264/yuv420p 540×960 a 12 FPS/24 frames y AAC-LC mono a 48 kHz, incluidos timestamps, muestras presentadas, priming/padding y límite de 64 MiB. Provenance enlaza run/proyecto, hashes de inputs, fingerprints, runtimes, parámetros y resumen/sha256 de ffprobe.
+- MP4/provenance se validan en staging, publican con creación exclusiva, se releen y validan antes del checkpoint. El par de archivos y el manifiesto no es una transacción común; outputs huérfanos no se adoptan. Fallos mantienen Stage 04 sin `completed`. Staging y evidencia parcial permanecen para inspección; limpieza limita a outputs publicados cuya identidad se posee.
+- `validate-manifest` valida por hashes y datos de ffprobe guardados, sin procesos, extracción ZIP, temporales ni escrituras. Stage 05/06 siguen `pending`.
+- P3-A cerrado: techo entero conservador de PCM-a-ms documentado; pruebas para 43 200 → 1800 ms, 43 201 → 1801 ms, 48 000 → 2000 ms y storyboard más corto.
+- P3-B cerrado antes de conectar el helper: rechazo de rutas absolutas Windows/POSIX/UNC, traversal, componentes vacíos/punto, separadores mixtos, nombres reservados con extensión y escapes symlink/reparse; las rutas de request siguen fijas.
+- Remotion no está instalado en esta máquina de auditoría; no se instalaron paquetes ni se ejecutó Node worker, Kokoro, Blender, Remotion, ffprobe sobre medios o FFmpeg. Mocks verifican el flujo padre, no compatibilidad de instalación ni salida codificada. Falta el gate local autorizado para confirmar AAC/MP4, muestras presentadas, priming/padding y ejecución real multiplataforma.
+
+Remotion documenta `sampleRate` como opción de `renderMedia()` desde v4.0.448; el worker usa `sampleRate: 48000` para la salida AAC [Audio Sample Rate](https://www.remotion.dev/docs/sample-rate). `@remotion/media` ofrece otra API de audio recomendada en releases actuales, pero el worker fijo sigue usando `Audio` de Remotion 4.0.540 y ese render no se ha validado con dependencias instaladas [Audio component](https://www.remotion.dev/docs/media/audio).

@@ -229,4 +229,15 @@ Diseño aprobado de Phase 5C.1 e integrado mediante PR #27: [diseño de composic
 - Validación determinista de duración, captions, cuantización por frame, colisiones y anchors `clock_source: recording`; texto y tiempos no se inventan ni modifican.
 - Se añaden verificaciones de provenance/hash/contexto para las entradas Stage 04 de un mismo run, schemas cerrados de request/response y staging exclusivo. `validate-manifest` existente y los perfiles legacy permanecen intactos.
 - Preflight de rutas absolutas Node/ffprobe, reparse/symlink, versiones y hashes. Paquetes exactos en `workers/remotion/`; lock npm v3 generado offline con caché, sin instalar paquetes. Versiones observadas localmente: Node 24.16.0, Remotion 4.0.540, React/React DOM 19.3.1 y ffprobe 9.0.2.
-- Esta fase no habilita ni ejecuta Stage 04; Stage 04/05/06 continúan `pending`. No se compone, publica MP4 ni se ejecutan motores de medios reales. Ver [diseño Phase 5C.4](remotion-productive-composition-design.md#phase-5c4--contrato-y-preflight-implementado-en-rama-pendiente-de-auditoría).
+- Fase cerrada mediante PR #30 y merge commit `4ef7707ccd45a27b306743cc2f199088cd82b4ab`. Auditoría independiente aprobada, sin P0/P1/P2; CI Ubuntu 24.04, Ubuntu 26.04 y Windows 2025 en SUCCESS. En ese corte Stage 04 no se habilitó y no se generó MP4.
+- Deudas P3 resueltas en Phase 5C.5: política de techo temporal documentada y probada; validador de rutas endurecido antes de sus primeros consumidores productivos.
+- Ver [diseño Phase 5C.4/5](remotion-productive-composition-design.md).
+
+## v0.10 — Phase 5C.5: Remotion Stage 04 Composition & Exclusive Publication
+
+- Implementa el worker fijo bajo `workers/remotion/` con Remotion 4.0.540 y React/React DOM 19.3.1, dependencias bloqueadas, composición 540×960/12 FPS/24 frames, 24 PNG, WAV padded en staging y captions. No evalúa código de proyecto ni abre el `.blend`.
+- Integra Stage 04 después de Stage 01 → Stage 03 Kokoro → validación temporal → Stage 02 Blender. Exige Node y ffprobe por paths absolutos, hash/revalidación del runtime/worker/lockfile, timeout de 600 s, concurrencia 1 y supervisión de proceso.
+- Comprueba streams, timestamps, frame count, AAC priming/padding y límites mediante ffprobe; publica exclusivamente MP4/provenance, relee y valida ambos antes del checkpoint Stage 04. `validate-manifest` permanece read-only y usa el resumen/hash de ffprobe guardado.
+- P3-A: documentada política conservadora de techo y pruebas para 43 200, 43 201 y 48 000 muestras, además de duración de storyboard insuficiente.
+- P3-B: paths Windows/POSIX/UNC, traversal, puntos, separadores vacíos/incompatibles, nombres reservados y escapes de symlink/reparse se rechazan; inputs del worker continúan fijos.
+- CI y auditoría independiente pendientes. No se instalaron dependencias ni se ejecutaron Kokoro, Blender, Remotion o FFmpeg; no se generó MP4 real. Stage 05/06 siguen pendientes. La ejecución real del render/ffprobe y la compatibilidad AAC/MP4 quedan para un gate autorizado posterior.
