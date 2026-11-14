@@ -469,7 +469,7 @@ class ProductiveCompositionExecutionTests(unittest.TestCase):
         provenance_output = self.root / ".pipeline/work/composition-provenance.json"
 
         def fail_second_publication(path, payload, owned):
-            if Path(path) == provenance_output:
+            if Path(path).name == provenance_output.name:
                 raise OSError("synthetic partial publication failure")
             return original_write(path, payload, owned)
 
