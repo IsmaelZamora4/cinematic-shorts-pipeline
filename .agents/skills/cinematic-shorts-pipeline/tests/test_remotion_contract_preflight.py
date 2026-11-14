@@ -342,7 +342,8 @@ class RemotionContractPreflightTests(unittest.TestCase):
             pipeline._validate_remotion_runtime_path("node.exe", "Node")
         runtime = self.root / "node.exe"
         runtime.write_bytes(b"runtime")
-        self.assertEqual(runtime.resolve(), pipeline._validate_remotion_runtime_path(runtime, "Node"))
+        validated_runtime = pipeline._validate_remotion_runtime_path(runtime, "Node")
+        self.assertTrue(os.path.samefile(runtime, validated_runtime))
         with mock.patch.object(pipeline, "_inspect_path", side_effect=ValueError("reparse")):
             with self.assertRaisesRegex(ValueError, "reparse"):
                 pipeline._validate_remotion_runtime_path(runtime, "Node")
