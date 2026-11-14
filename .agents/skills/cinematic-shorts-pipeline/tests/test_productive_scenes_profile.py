@@ -127,6 +127,29 @@ def make_combined_config(root):
     return config
 
 
+def make_remotion_config(root):
+    config = make_combined_config(root)
+    compose = next(stage for stage in config["stages"] if stage["id"] == "04-remotion-compose")
+    compose.update(
+        adapter_status="implemented",
+        inputs=["validated-plan", "storyboard", "scene-package", "narration", "narration-provenance"],
+        outputs=[
+            {"id": "composite", "path": ".pipeline/work/composite.mp4"},
+            {"id": "composition-provenance", "path": ".pipeline/work/composition-provenance.json"},
+        ],
+        tools=["remotion", "ffprobe"],
+    )
+    config["tools"].append({
+        "id": "ffprobe", "executable": "ffprobe", "version_requirement": ">=4.1.0",
+        "availability": "verified", "adapter_status": "implemented",
+    })
+    next(tool for tool in config["tools"] if tool["id"] == "remotion").update(
+        executable="node", version_requirement="Remotion 4.0.540; React 19.3.1; Node.js LTS 22/24/26",
+        availability="verified", adapter_status="implemented",
+    )
+    return config
+
+
 def add_extra_stage(config, adapter_status="pending"):
     config["stages"].append({
         "id": "07-extra", "adapter": "extra-worker", "adapter_status": adapter_status,
@@ -186,6 +209,29 @@ class ProductiveScenesProfileTests(unittest.TestCase):
         loaded, errors, _, _ = pipeline.load_and_validate_config(self.config_path)
         self.assertEqual([], errors)
         self.assertEqual("blender-independent", pipeline._classify_productive_profile(loaded))
+
+    def test_classifies_implemented_remotion_stage_with_fixed_contract(self):
+        self.config = make_remotion_config(self.root)
+        self.write_config()
+        loaded, errors, _, _ = pipeline.load_and_validate_config(self.config_path)
+        self.assertEqual([], errors)
+        self.assertEqual("audiovisual-combined", pipeline._classify_productive_profile(loaded))
+
+    def test_rejects_remotion_stage_with_unapproved_input_output_or_runtime(self):
+        variants = (
+            (lambda stage, tools: stage.update(inputs=["validated-plan", "user-script"]), "request"),
+            (lambda stage, tools: stage.update(outputs=[{"id": "composite", "path": ".pipeline/work/x.mp4"}]), "output"),
+            (lambda stage, tools: next(tool for tool in tools if tool["id"] == "ffprobe").update(availability="not_checked"), "profile"),
+        )
+        for mutate, label in variants:
+            with self.subTest(label=label):
+                self.config = make_remotion_config(self.root)
+                stage = next(item for item in self.config["stages"] if item["id"] == "04-remotion-compose")
+                mutate(stage, self.config["tools"])
+                self.write_config()
+                loaded, errors, _, _ = pipeline.load_and_validate_config(self.config_path)
+                self.assertIsNone(pipeline._classify_productive_profile(loaded))
+                self.assertTrue(errors, errors)
 
     def test_rejects_implemented_extra_stage_in_productive_blender_profile(self):
         scenes = next(stage for stage in self.config["stages"] if stage["id"] == "02-blender-scenes")
