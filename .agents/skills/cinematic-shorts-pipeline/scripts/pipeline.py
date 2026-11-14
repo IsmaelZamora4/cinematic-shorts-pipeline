@@ -2235,12 +2235,37 @@ def _validate_remotion_input_context(run_id, project_id, validated_plan_sha256,
     }
 
 
-def _validate_remotion_relative_path(value, label):
-    if not isinstance(value, str) or not value or "\\" in value:
+def _validate_remotion_relative_path(value, label, *, root=None):
+    if (
+        not isinstance(value, str) or not value or "\x00" in value
+        or "\\" in value or ":" in value or value.startswith("/")
+    ):
         raise ValueError(f"{label} must be a safe project-relative POSIX path")
-    path = PurePosixPath(value)
-    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
-        raise ValueError(f"{label} must be a safe project-relative POSIX path")
+    parts = value.split("/")
+    reserved_devices = re.compile(r"(?i)^(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\..*)?$")
+    if any(
+        part in {"", ".", ".."} or part.endswith((" ", "."))
+        or any(ord(character) < 32 or character in '<>"|?*' for character in part)
+        or reserved_devices.fullmatch(part)
+        for part in parts
+    ):
+        raise ValueError(f"{label} must be a safe canonical project-relative POSIX path")
+    if root is not None:
+        project_root = Path(root)
+        root_entry = _inspect_path(project_root)
+        if root_entry is None or not stat.S_ISDIR(root_entry.st_mode):
+            raise ValueError(f"{label} root must be a regular directory")
+        resolved_root = project_root.resolve()
+        current = project_root
+        for index, part in enumerate(parts):
+            current = current / part
+            entry = _inspect_path(current)
+            if entry is not None and index < len(parts) - 1 and not stat.S_ISDIR(entry.st_mode):
+                raise ValueError(f"{label} parent component is not a directory")
+        try:
+            current.resolve().relative_to(resolved_root)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ValueError(f"{label} escapes its project root or crosses a link") from exc
     return value
 
 

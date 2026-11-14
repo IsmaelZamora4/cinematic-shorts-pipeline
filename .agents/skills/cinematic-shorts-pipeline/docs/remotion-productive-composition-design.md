@@ -85,6 +85,8 @@ Antes de componer:
 
 Reloj canónico: muestras enteras de 24.000 Hz. El WAV empieza en muestra 0. A 12 FPS, cada frame ocupa 2.000 muestras y 24 frames ocupan `[0,48.000)`, exactamente dos segundos.
 
+La política de `voiceover.duration_ms` es conservadora: convertir muestras PCM a milisegundos usa techo entero, `(muestras × 1000 + 23 999) // 24 000` (equivalente a dividir `muestras × 1000` entre 24 000 con techo). Por ejemplo, 43 200 muestras son 1 800 ms y 43 201 muestras son 1 801 ms. El storyboard debe declarar al menos ese milisegundo redondeado; no se redondea hacia abajo ni se retimea el WAV.
+
 - Si el WAV tiene más de 48.000 muestras, Stage 04 se bloquea **antes de ejecutar Blender**. No recorta voz ni acorta audio.
 - Si tiene menos, Remotion completa la composición hasta 48.000 muestras con silencio final declarado. No modifica WAV publicado ni provenance Kokoro.
 - No duplica PNG, congela el último frame, cambia FPS, velocidad, pitch o duración de fuente, ni retimea implícitamente.

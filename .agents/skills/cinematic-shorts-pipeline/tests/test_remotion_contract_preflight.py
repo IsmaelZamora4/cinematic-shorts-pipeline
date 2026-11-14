@@ -69,6 +69,22 @@ class RemotionContractPreflightTests(unittest.TestCase):
         self.assertEqual(48_000, result["source_samples"])
         self.assertEqual(0, result["silence_samples"])
 
+    def test_pcm_duration_uses_conservative_ceiling_for_non_multiple_of_24_samples(self):
+        self.wav = make_wav(samples=[1200] * 43_201)
+        self.storyboard["voiceover"]["duration_ms"] = 1801
+        self.provenance["hashes"]["wav_sha256"] = hashlib.sha256(self.wav).hexdigest()
+        result = self.timeline()
+        self.assertEqual(43_201, result["source_samples"])
+        self.assertEqual(1801, self.storyboard["voiceover"]["duration_ms"])
+        self.assertEqual(4_799, result["silence_samples"])
+
+    def test_pcm_duration_rejects_storyboard_shorter_than_conservative_ceiling(self):
+        self.wav = make_wav(samples=[1200] * 43_201)
+        self.storyboard["voiceover"]["duration_ms"] = 1800
+        self.provenance["hashes"]["wav_sha256"] = hashlib.sha256(self.wav).hexdigest()
+        with self.assertRaisesRegex(ValueError, "duration_ms"):
+            self.timeline()
+
     def test_audio_over_48000_samples_is_rejected(self):
         self.wav = make_wav(samples=[1200] * 48_001)
         self.storyboard["voiceover"]["duration_ms"] = 2000
@@ -354,6 +370,31 @@ class RemotionContractPreflightTests(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertTrue(first.is_dir())
         self.assertTrue(second.is_dir())
+
+    def test_relative_path_accepts_only_canonical_project_relative_posix_paths(self):
+        for value in ("frames/0001.png", "audio/narration.wav"):
+            with self.subTest(value=value):
+                self.assertEqual(value, pipeline._validate_remotion_relative_path(value, "input"))
+
+    def test_relative_path_rejects_noncanonical_or_windows_unsafe_paths(self):
+        for value in (
+            "C:/temp/x", "NUL.txt", "a/./b", "a//b", "../x", "/tmp/x", "//server/share/x",
+            "\\\\server\\share\\x", "a\\b", "a:b", "a/CON.txt", "a/COM1.json", "a/LPT9",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    pipeline._validate_remotion_relative_path(value, "input")
+
+    def test_relative_path_rejects_symlink_or_reparse_components_when_root_is_given(self):
+        target = self.root / "target"
+        target.mkdir()
+        link = self.root / "linked"
+        try:
+            link.symlink_to(target, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlink creation is not available on this host")
+        with self.assertRaisesRegex(ValueError, "link|reparse|symlink"):
+            pipeline._validate_remotion_relative_path("linked/file.png", "input", root=self.root)
 
 
 if __name__ == "__main__":
