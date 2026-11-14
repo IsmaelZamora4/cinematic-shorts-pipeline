@@ -85,8 +85,11 @@ class ProductiveCompositionExecutionTests(unittest.TestCase):
     @staticmethod
     def fake_ffprobe_json(size_bytes):
         packets = [{"stream_index": 0, "pts": frame, "duration": 1} for frame in range(24)]
+        audio_pts = -1024
         for index in range(96):
-            packet = {"stream_index": 1, "pts": (index - 1) * 1024, "duration": 1024}
+            duration = 768 if index == 94 else 1280 if index == 95 else 1024
+            packet = {"stream_index": 1, "pts": audio_pts, "duration": duration}
+            audio_pts += duration
             if index == 0:
                 packet["side_data_list"] = [{"side_data_type": "Skip Samples", "skip_samples": 1024, "discard_padding": 0}]
             elif index == 95:

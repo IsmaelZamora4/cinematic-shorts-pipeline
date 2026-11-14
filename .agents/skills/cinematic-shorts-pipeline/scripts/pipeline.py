@@ -2464,10 +2464,6 @@ def _validate_remotion_ffprobe(data, *, expected_size_bytes):
         raise ValueError("ffprobe video packet timestamps are discontinuous or out of contract")
 
     audio_packet_samples = []
-    priming_samples = 0
-    padding_samples = 0
-    has_priming_metadata = False
-    has_padding_metadata = False
     try:
         for packet in audio_packets:
             pts = int(packet["pts"])
@@ -2475,26 +2471,54 @@ def _validate_remotion_ffprobe(data, *, expected_size_bytes):
             duration_samples = Fraction(duration) * audio_time_base * 48000
             if duration_samples.denominator != 1 or duration_samples <= 0:
                 raise ValueError("ffprobe AAC packet duration is not an integer sample count")
-            audio_packet_samples.append((pts, duration, int(duration_samples)))
-            for side_data in packet.get("side_data_list", []):
-                if not isinstance(side_data, dict) or side_data.get("side_data_type") != "Skip Samples":
-                    continue
-                if "skip_samples" in side_data:
-                    has_priming_metadata = True
-                    priming_samples += int(side_data["skip_samples"])
-                if "discard_padding" in side_data:
-                    has_padding_metadata = True
-                    padding_samples += int(side_data["discard_padding"])
+            packet_samples = int(duration_samples)
+            side_data_list = packet.get("side_data_list", [])
+            if not isinstance(side_data_list, list):
+                raise ValueError("ffprobe AAC packet side data is malformed")
+            skip_records = [
+                item for item in side_data_list
+                if isinstance(item, dict) and item.get("side_data_type") == "Skip Samples"
+            ]
+            if len(skip_records) > 1:
+                raise ValueError("ffprobe AAC packet has duplicate Skip Samples metadata")
+            skip_samples = discard_padding = 0
+            has_skip_metadata = False
+            if skip_records:
+                skip_record = skip_records[0]
+                if not {"skip_samples", "discard_padding"} <= set(skip_record):
+                    raise ValueError("ffprobe AAC Skip Samples metadata is incomplete")
+                skip_samples = skip_record["skip_samples"]
+                discard_padding = skip_record["discard_padding"]
+                if (
+                    type(skip_samples) is not int or type(discard_padding) is not int
+                    or skip_samples < 0 or discard_padding < 0
+                    or skip_samples > packet_samples or discard_padding > packet_samples
+                    or skip_samples + discard_padding > packet_samples
+                ):
+                    raise ValueError("ffprobe AAC Skip Samples metadata exceeds packet duration")
+                has_skip_metadata = True
+            audio_packet_samples.append((
+                pts, duration, packet_samples, skip_samples, discard_padding, has_skip_metadata,
+            ))
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"ffprobe AAC packet timing or priming metadata is malformed: {exc}") from exc
     audio_packet_samples.sort(key=lambda item: item[0])
     for previous, following in zip(audio_packet_samples, audio_packet_samples[1:]):
         if following[0] != previous[0] + previous[1]:
             raise ValueError("ffprobe AAC packet timestamps contain a gap or overlap")
+    first_packet, last_packet = audio_packet_samples[0], audio_packet_samples[-1]
+    if not first_packet[5] or first_packet[3] <= 0:
+        raise ValueError("ffprobe AAC priming metadata is missing from the first temporal packet")
+    if not last_packet[5]:
+        raise ValueError("ffprobe AAC padding metadata is missing from the last temporal packet")
+    for index, packet in enumerate(audio_packet_samples):
+        if (packet[3] and index != 0) or (packet[4] and index != len(audio_packet_samples) - 1):
+            raise ValueError("ffprobe AAC priming or padding is attached to an intermediate packet")
     coded_samples = sum(item[2] for item in audio_packet_samples)
+    priming_samples = sum(item[3] for item in audio_packet_samples)
+    padding_samples = sum(item[4] for item in audio_packet_samples)
     if (
-        not has_priming_metadata or not has_padding_metadata or priming_samples <= 0
-        or padding_samples < 0 or padding_samples > 2048
+        priming_samples <= 0 or padding_samples > 2048
         or coded_samples - priming_samples - padding_samples != 96000
     ):
         raise ValueError("ffprobe cannot prove AAC priming/padding yields exactly 96,000 presented samples")

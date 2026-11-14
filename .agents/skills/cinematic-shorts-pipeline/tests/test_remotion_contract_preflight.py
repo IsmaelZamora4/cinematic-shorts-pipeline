@@ -311,8 +311,11 @@ class RemotionContractPreflightTests(unittest.TestCase):
             {"stream_index": 0, "pts": frame, "duration": 1}
             for frame in range(24)
         ]
+        audio_pts = -1024
         for index in range(96):
-            packet = {"stream_index": 1, "pts": (index - 1) * 1024, "duration": 1024}
+            duration = 768 if index == 94 else 1280 if index == 95 else 1024
+            packet = {"stream_index": 1, "pts": audio_pts, "duration": duration}
+            audio_pts += duration
             if index == 0:
                 packet["side_data_list"] = [{
                     "side_data_type": "Skip Samples", "skip_samples": 1024, "discard_padding": 0,
@@ -345,12 +348,98 @@ class RemotionContractPreflightTests(unittest.TestCase):
     def test_ffprobe_rejects_unprovable_audio_padding_and_video_timestamp_gaps(self):
         result = self.valid_ffprobe_result()
         result["packets"][-1].pop("side_data_list")
-        with self.assertRaisesRegex(ValueError, "priming/padding"):
+        with self.assertRaisesRegex(ValueError, "padding metadata|priming/padding"):
             pipeline._validate_remotion_ffprobe(json.dumps(result).encode(), expected_size_bytes=100_000)
         result = self.valid_ffprobe_result()
         result["packets"][1]["pts"] = 3
         with self.assertRaisesRegex(ValueError, "video packet timestamps"):
             pipeline._validate_remotion_ffprobe(json.dumps(result).encode(), expected_size_bytes=100_000)
+
+    def test_ffprobe_rejects_trim_metadata_outside_temporal_stream_edges(self):
+        cases = {
+            "priming split with intermediate packet": (512, 512, 1280, 0),
+            "priming only on intermediate packet": (0, 1024, 1280, 0),
+            "padding split with intermediate packet": (1024, 0, 640, 640),
+            "padding only on intermediate packet": (1024, 0, 0, 1280),
+        }
+        for label, (first_skip, middle_skip, last_padding, middle_padding) in cases.items():
+            with self.subTest(label=label):
+                result = self.valid_ffprobe_result()
+                first_audio, middle_audio, last_audio = (result["packets"][index] for index in (24, 34, 119))
+                if label == "padding only on intermediate packet":
+                    next_audio = result["packets"][35]
+                    middle_audio["duration"] = 1280
+                    next_audio["pts"] += 256
+                    next_audio["duration"] = 768
+                first_audio["side_data_list"] = [{
+                    "side_data_type": "Skip Samples", "skip_samples": first_skip, "discard_padding": 0,
+                }]
+                middle_audio["side_data_list"] = [{
+                    "side_data_type": "Skip Samples", "skip_samples": middle_skip,
+                    "discard_padding": middle_padding,
+                }]
+                last_audio["side_data_list"] = [{
+                    "side_data_type": "Skip Samples", "skip_samples": 0, "discard_padding": last_padding,
+                }]
+                with self.assertRaisesRegex(ValueError, "priming|padding|packet"):
+                    pipeline._validate_remotion_ffprobe(
+                        json.dumps(result).encode(), expected_size_bytes=100_000,
+                    )
+
+    def test_ffprobe_rejects_invalid_and_ambiguous_skip_sample_metadata(self):
+        cases = {
+            "negative priming": (24, [{"side_data_type": "Skip Samples", "skip_samples": -1, "discard_padding": 0}]),
+            "negative padding": (119, [{"side_data_type": "Skip Samples", "skip_samples": 0, "discard_padding": -1}]),
+            "priming exceeds packet duration": (24, [{"side_data_type": "Skip Samples", "skip_samples": 1025, "discard_padding": 0}]),
+            "padding exceeds packet duration": (119, [{"side_data_type": "Skip Samples", "skip_samples": 0, "discard_padding": 1281}]),
+            "duplicate identical metadata": (24, [
+                {"side_data_type": "Skip Samples", "skip_samples": 1024, "discard_padding": 0},
+                {"side_data_type": "Skip Samples", "skip_samples": 1024, "discard_padding": 0},
+            ]),
+            "contradictory duplicate metadata": (24, [
+                {"side_data_type": "Skip Samples", "skip_samples": 1024, "discard_padding": 0},
+                {"side_data_type": "Skip Samples", "skip_samples": 512, "discard_padding": 0},
+            ]),
+        }
+        for label, (packet_index, side_data) in cases.items():
+            with self.subTest(label=label):
+                result = self.valid_ffprobe_result()
+                result["packets"][packet_index]["side_data_list"] = side_data
+                with self.assertRaises(ValueError):
+                    pipeline._validate_remotion_ffprobe(
+                        json.dumps(result).encode(), expected_size_bytes=100_000,
+                    )
+
+    def test_ffprobe_checks_audio_trim_positions_after_pts_ordering(self):
+        result = self.valid_ffprobe_result()
+        result["packets"][24:28] = reversed(result["packets"][24:28])
+        summary = pipeline._validate_remotion_ffprobe(
+            json.dumps(result).encode(), expected_size_bytes=100_000,
+        )
+        self.assertEqual(96_000, summary["audio"]["presented_samples"])
+
+        for delta, label in ((1, "overlap"), (-1, "gap")):
+            with self.subTest(label=label):
+                broken = self.valid_ffprobe_result()
+                broken["packets"][25]["pts"] += delta
+                with self.assertRaisesRegex(ValueError, "gap or overlap"):
+                    pipeline._validate_remotion_ffprobe(
+                        json.dumps(broken).encode(), expected_size_bytes=100_000,
+                    )
+
+    def test_ffprobe_requires_priming_and_final_padding_metadata_at_edges(self):
+        cases = {
+            "missing initial priming": 24,
+            "missing final padding": 119,
+        }
+        for label, packet_index in cases.items():
+            with self.subTest(label=label):
+                result = self.valid_ffprobe_result()
+                result["packets"][packet_index].pop("side_data_list")
+                with self.assertRaisesRegex(ValueError, "priming metadata|padding metadata|priming/padding"):
+                    pipeline._validate_remotion_ffprobe(
+                        json.dumps(result).encode(), expected_size_bytes=100_000,
+                    )
 
     def test_ffprobe_rejects_codec_or_container_size_mismatch(self):
         result = self.valid_ffprobe_result()
