@@ -1,13 +1,13 @@
 # Cinematic Shorts Pipeline
 
-**A Codex skill and Python toolkit for planning and validating cinematic 3D shorts, with verified local Kokoro TTS execution for two pipeline stages.** It turns a creative brief into reviewable plans, checks versioned contracts, and can produce narration through a local productive TTS profile. Blender scenes, Remotion composition, FFmpeg finalization, and end-to-end video generation are not implemented.
+**A Codex skill and Python toolkit for planning and validating cinematic 3D shorts, with verified local Kokoro, Blender scene, and fixed Remotion composition stages.** It turns a creative brief into reviewable plans, checks versioned contracts, and can produce narration and a tightly bounded two-second composition through local productive profiles. FFmpeg finalization, audiovisual QA, and end-to-end short generation remain unimplemented.
 
 [![GitHub Actions](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/actions/workflows/validate.yml/badge.svg?branch=main)](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/actions/workflows/validate.yml)
 [![MIT License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.12](https://img.shields.io/badge/Python-3.12-blue.svg)](.github/workflows/validate.yml)
 [![Codex Skill](https://img.shields.io/badge/Codex-Skill-6f42c1.svg)](.agents/skills/cinematic-shorts-pipeline/SKILL.md)
 
-**Resumen en español:** Skill de Codex y validadores Python para planificar cortos 3D y validar contratos. Incluye piloto Kokoro standalone y TTS productivo local limitado a Stage 01/03. Blender, Remotion, FFmpeg y la generación completa de video siguen pendientes.
+**Resumen en español:** Skill de Codex y validadores Python para planificar cortos 3D y validar contratos. Incluye Kokoro productivo, escenas Blender y composición Remotion fija de dos segundos. FFmpeg, QA audiovisual y generación completa siguen pendientes.
 
 ## Contents
 
@@ -285,7 +285,7 @@ Automated checks validate declared structure and contracts. They do not judge st
 - The productive runner is limited to Stage 01 and Stage 03 for Kokoro; it is not a general DAG scheduler or recovery engine. No retries, resume, or automatic orphan adoption.
 - `run-tts-kokoro` remains a standalone pilot and does not mark stages complete. Productive TTS supports only Kokoro 0.6.1, `em_alex` / `es`, CPUExecutionProvider, mono PCM16 WAV at 24 kHz.
 - Piper is a recognized contract provider, not an executable adapter.
-- Blender scene generation, Remotion composition, FFmpeg finalization, production quality control, caption alignment, and complete video generation are not implemented as pipeline executors. Stages 02/04/05/06 remain pending.
+- Blender Stage 02 and fixed Remotion Stage 04 are implemented in their eligible local profiles. Stage 04 is limited to one 540×960 composition, 12 FPS, 24 frames, and 48,000 PCM samples; it needs an installed, pinned worker runtime and has no real-render gate evidence yet. FFmpeg Stage 05, production quality control Stage 06, caption alignment, and complete video generation remain unimplemented.
 - Storyboard and timing checks do not establish visual quality, animation continuity, speech intelligibility, or synchronization. TTS output requires human listening review.
 - No effective CPU/RAM/VRAM limits, network isolation, or complete TOCTOU guarantee are provided.
 
@@ -295,7 +295,8 @@ Automated checks validate declared structure and contracts. They do not judge st
 - **v0.9 — Standalone Kokoro local pilot:** merged through [PR #9](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/pull/9). `run-tts-kokoro` remains separate from productive stages.
 - **v0.10 Phase 4A/4B — Productive local TTS:** approved design and productive Stage 01/03 implementation merged through [PR #12](https://github.com/IsmaelZamora4/cinematic-shorts-pipeline/pull/12), merge commit `aba0b4335062655291488b2ec128ee05922aff16`. Automated CI passed on Ubuntu 24.04, Ubuntu 26.04 and Windows 2025; one real local Kokoro inference was validated on Windows only.
 - **v0.10 Phase 4C — Documentation & Release Readiness:** documents the shipped TTS capability, its evidence, and release limits; no audiovisual implementation or media generation.
-- **Next:** plan and review audiovisual adapters separately. Blender, Remotion, FFmpeg and complete short generation remain unimplemented.
+- **Phase 5C.5:** Remotion Stage 04 composition and exclusive publication are implemented on its feature branch; see the [full roadmap](.agents/skills/cinematic-shorts-pipeline/docs/roadmap.md) for PR and CI status.
+- **Next:** independently audit Phase 5C.5. Do not merge or run the real gate before authorization. FFmpeg and QA remain unimplemented.
 
 See the [full roadmap](.agents/skills/cinematic-shorts-pipeline/docs/roadmap.md) for phase details.
 

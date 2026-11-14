@@ -52,3 +52,9 @@ Las severidades se asignaron al reproducir los hallazgos históricos: los efecto
 ## Controles y límites pendientes
 
 Mantener la matriz Ubuntu 24.04/26.04 y Windows 2025. Los tests mock prueban fallos, hashes, fingerprints, manifest y recuperación sin assets reales. Symlink real en Windows puede omitirse solo con `WinError 1314`; una omisión no equivale a prueba de symlink. Una ejecución local usa runtime/assets del operador; no prueba aislamiento de red ni límites RAM/VRAM. `validate-manifest` confirma el estado/artefactos existentes, no ejecuta ni reanuda una tarea.
+
+## Stage 04 Remotion — perfil combinado Phase 5C.5
+
+- Consume cinco entradas fijas copiadas al staging validado. Node, `ffprobe`, worker MJS, package manifest y lockfile tienen paths/versiones/hash comprobados; argv fijo, `shell=False`, timeout máximo 600 s. Se eliminan opciones Node/npm y proxies heredados, y se desactiva telemetría Remotion. No hay cuotas OS de CPU/RAM/VRAM, aislamiento de red ni protección TOCTOU absoluta.
+- El worker compone 24 PNG y narration WAV mono PCM16 a 24 kHz padded solo en staging, sin código JSON, imports del proyecto, evaluación dinámica ni acceso al `.blend`. El padre vuelve a comprobar entradas/runtime después del proceso, valida respuesta y MP4 acotados, ejecuta ffprobe con JSON limitado, comprueba AAC/MP4/timestamps/priming/padding y publica MP4/provenance exclusivamente. `validate-manifest` comprueba hashes y resumen ffprobe guardado, sin volver a ejecutar ffprobe.
+- MP4, provenance y manifiesto no forman una transacción conjunta. Outputs se releen; solo se limpian si su identidad se demuestra como propia. Staging fallido permanece para inspección, sin adopción automática. Worker/ffprobe simulados no prueban compatibilidad real del codec/runtime.

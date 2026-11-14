@@ -69,6 +69,22 @@ class RemotionContractPreflightTests(unittest.TestCase):
         self.assertEqual(48_000, result["source_samples"])
         self.assertEqual(0, result["silence_samples"])
 
+    def test_pcm_duration_uses_conservative_ceiling_for_non_multiple_of_24_samples(self):
+        self.wav = make_wav(samples=[1200] * 43_201)
+        self.storyboard["voiceover"]["duration_ms"] = 1801
+        self.provenance["hashes"]["wav_sha256"] = hashlib.sha256(self.wav).hexdigest()
+        result = self.timeline()
+        self.assertEqual(43_201, result["source_samples"])
+        self.assertEqual(1801, self.storyboard["voiceover"]["duration_ms"])
+        self.assertEqual(4_799, result["silence_samples"])
+
+    def test_pcm_duration_rejects_storyboard_shorter_than_conservative_ceiling(self):
+        self.wav = make_wav(samples=[1200] * 43_201)
+        self.storyboard["voiceover"]["duration_ms"] = 1800
+        self.provenance["hashes"]["wav_sha256"] = hashlib.sha256(self.wav).hexdigest()
+        with self.assertRaisesRegex(ValueError, "duration_ms"):
+            self.timeline()
+
     def test_audio_over_48000_samples_is_rejected(self):
         self.wav = make_wav(samples=[1200] * 48_001)
         self.storyboard["voiceover"]["duration_ms"] = 2000
@@ -237,6 +253,14 @@ class RemotionContractPreflightTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown fields"):
             pipeline._validate_remotion_worker_request(json.dumps(request).encode())
 
+    def test_fixed_worker_uses_supported_sample_rate_option_and_rejects_duplicate_wav_data(self):
+        worker_path = Path(pipeline.__file__).resolve().parents[1] / "workers" / "remotion" / "worker.mjs"
+        source = worker_path.read_text(encoding="utf-8")
+        self.assertIn("sampleRate: 48000", source)
+        self.assertNotIn("audioSampleRate", source)
+        self.assertIn("if (pcm !== undefined || size % 2)", source)
+        self.assertNotIn("samples !== undefined", source)
+
     def test_worker_request_rejects_caption_times_outside_or_inconsistent_with_frames(self):
         request = {
             "record_type": "remotion-worker-request", "request_version": 1,
@@ -280,6 +304,62 @@ class RemotionContractPreflightTests(unittest.TestCase):
             pipeline._validate_remotion_worker_response(json.dumps({**response, "run_id": "wrong"}).encode(), "run-test")
         with self.assertRaisesRegex(ValueError, "maximum"):
             pipeline._validate_remotion_worker_response(b" " * (pipeline.REMOTION_MAX_WORKER_RESPONSE_BYTES + 1), "run-test")
+
+    @staticmethod
+    def valid_ffprobe_result():
+        packets = [
+            {"stream_index": 0, "pts": frame, "duration": 1}
+            for frame in range(24)
+        ]
+        for index in range(96):
+            packet = {"stream_index": 1, "pts": (index - 1) * 1024, "duration": 1024}
+            if index == 0:
+                packet["side_data_list"] = [{
+                    "side_data_type": "Skip Samples", "skip_samples": 1024, "discard_padding": 0,
+                }]
+            elif index == 95:
+                packet["side_data_list"] = [{
+                    "side_data_type": "Skip Samples", "skip_samples": 0, "discard_padding": 1280,
+                }]
+            packets.append(packet)
+        return {
+            "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2", "size": "100000", "duration": "2.02"},
+            "streams": [
+                {"index": 0, "codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv420p",
+                 "width": 540, "height": 960, "r_frame_rate": "12/1", "avg_frame_rate": "12/1",
+                 "nb_read_frames": "24", "time_base": "1/12", "duration_ts": 24, "start_time": "0.000000"},
+                {"index": 1, "codec_type": "audio", "codec_name": "aac", "profile": "LC",
+                 "sample_rate": "48000", "channels": 1, "time_base": "1/48000",
+                 "duration_ts": 96000, "start_time": "0.000000"},
+            ],
+            "packets": packets,
+        }
+
+    def test_ffprobe_accepts_exact_video_and_measured_aac_padding(self):
+        result = self.valid_ffprobe_result()
+        summary = pipeline._validate_remotion_ffprobe(json.dumps(result).encode(), expected_size_bytes=100_000)
+        self.assertEqual(24, summary["video"]["frames"])
+        self.assertEqual(96_000, summary["audio"]["presented_samples"])
+        self.assertEqual(1280, summary["audio"]["padding_samples"])
+
+    def test_ffprobe_rejects_unprovable_audio_padding_and_video_timestamp_gaps(self):
+        result = self.valid_ffprobe_result()
+        result["packets"][-1].pop("side_data_list")
+        with self.assertRaisesRegex(ValueError, "priming/padding"):
+            pipeline._validate_remotion_ffprobe(json.dumps(result).encode(), expected_size_bytes=100_000)
+        result = self.valid_ffprobe_result()
+        result["packets"][1]["pts"] = 3
+        with self.assertRaisesRegex(ValueError, "video packet timestamps"):
+            pipeline._validate_remotion_ffprobe(json.dumps(result).encode(), expected_size_bytes=100_000)
+
+    def test_ffprobe_rejects_codec_or_container_size_mismatch(self):
+        result = self.valid_ffprobe_result()
+        result["streams"][0]["pix_fmt"] = "yuv444p"
+        with self.assertRaisesRegex(ValueError, "video stream"):
+            pipeline._validate_remotion_ffprobe(json.dumps(result).encode(), expected_size_bytes=100_000)
+        result = self.valid_ffprobe_result()
+        with self.assertRaisesRegex(ValueError, "container"):
+            pipeline._validate_remotion_ffprobe(json.dumps(result).encode(), expected_size_bytes=100_001)
 
     def test_runtime_versions_and_hashes_must_match_fixed_contract(self):
         identity = {
@@ -354,6 +434,32 @@ class RemotionContractPreflightTests(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertTrue(first.is_dir())
         self.assertTrue(second.is_dir())
+
+    def test_relative_path_accepts_only_canonical_project_relative_posix_paths(self):
+        for value in ("frames/0001.png", "audio/narration.wav"):
+            with self.subTest(value=value):
+                self.assertEqual(value, pipeline._validate_remotion_relative_path(value, "input"))
+
+    def test_relative_path_rejects_noncanonical_or_windows_unsafe_paths(self):
+        for value in (
+            "C:/temp/x", "NUL.txt", "a/./b", "a//b", "../x", "/tmp/x", "//server/share/x",
+            "\\\\server\\share\\x", "a\\b", "a:b", "a/CON.txt", "a/COM1.json", "a/LPT9",
+            "NUL .txt", "a/COM¹.log", "a/trailing./x",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    pipeline._validate_remotion_relative_path(value, "input")
+
+    def test_relative_path_rejects_symlink_or_reparse_components_when_root_is_given(self):
+        target = self.root / "target"
+        target.mkdir()
+        link = self.root / "linked"
+        try:
+            link.symlink_to(target, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlink creation is not available on this host")
+        with self.assertRaisesRegex(ValueError, "link|reparse|symlink"):
+            pipeline._validate_remotion_relative_path("linked/file.png", "input", root=self.root)
 
 
 if __name__ == "__main__":

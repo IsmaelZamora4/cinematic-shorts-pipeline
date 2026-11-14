@@ -15,7 +15,10 @@ import sys
 import threading
 import time
 import uuid
+import zipfile
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
+from fractions import Fraction
 from pathlib import Path, PurePosixPath
 
 from scene_package_builder import build_scene_package
@@ -73,6 +76,9 @@ REMOTION_SAMPLE_RATE = 24000
 REMOTION_SAMPLES_PER_FRAME = REMOTION_SAMPLE_RATE // REMOTION_FPS
 REMOTION_MAX_SAMPLES = REMOTION_SAMPLES_PER_FRAME * REMOTION_FRAME_COUNT
 REMOTION_MAX_MP4_BYTES = 64 * 1024 * 1024
+REMOTION_MAX_FFPROBE_BYTES = 2 * 1024 * 1024
+REMOTION_MAX_PROVENANCE_BYTES = 64 * 1024
+REMOTION_MAX_FRAME_BYTES = 32 * 1024 * 1024
 REMOTION_MAX_WORKER_REQUEST_BYTES = 128 * 1024
 REMOTION_MAX_WORKER_RESPONSE_BYTES = 64 * 1024
 REMOTION_MAX_DEPENDENCY_MANIFEST_BYTES = 64 * 1024
@@ -924,7 +930,7 @@ def validate_config(data, config_path, captured_resources=None):
         for stage_id in (TTS_NARRATION_STAGE_ID, LEGACY_NARRATION_STAGE_ID,
                          "04-remotion-compose", "05-ffmpeg-finalize", "06-quality-control"):
             stage = by_id.get(stage_id)
-            if stage_id == TTS_NARRATION_STAGE_ID and combined_candidate:
+            if combined_candidate and stage_id in {TTS_NARRATION_STAGE_ID, "04-remotion-compose"}:
                 continue
             if stage is not None and stage_id != "01-validate-project" and stage.get("adapter_status") != "pending":
                 errors.append(f"productive scene profile requires {stage_id}.adapter_status to remain pending")
@@ -978,7 +984,7 @@ def validate_config(data, config_path, captured_resources=None):
                 "02-blender-scenes", "04-remotion-compose", "05-ffmpeg-finalize", "06-quality-control",
             ):
                 audiovisual_stage = by_id.get(audiovisual_stage_id, {})
-                if audiovisual_stage_id == "02-blender-scenes" and combined_candidate:
+                if combined_candidate and audiovisual_stage_id in {"02-blender-scenes", "04-remotion-compose"}:
                     continue
                 if audiovisual_stage.get("adapter_status") != "pending":
                     errors.append(f"productive profile requires {audiovisual_stage_id}.adapter_status to remain pending")
@@ -2100,6 +2106,7 @@ def _validate_remotion_timeline(config, storyboard, wav_bytes, narration_provena
     if not isinstance(narration_provenance, dict):
         raise ValueError("Kokoro provenance must be an object")
     hashes = narration_provenance.get("hashes")
+    provenance_audio = narration_provenance.get("audio")
     if (
         narration_provenance.get("provenance_version") != 1
         or narration_provenance.get("record_type") != "productive-local-kokoro-tts"
@@ -2107,7 +2114,8 @@ def _validate_remotion_timeline(config, storyboard, wav_bytes, narration_provena
         or narration_provenance.get("project_id") != project_id
         or narration_provenance.get("dag_stage_id") != TTS_NARRATION_STAGE_ID
         or narration_provenance.get("provider") != "kokoro-onnx"
-        or narration_provenance.get("audio") != KOKORO_AUDIO
+        or not isinstance(provenance_audio, dict)
+        or any(provenance_audio.get(key) != value for key, value in KOKORO_AUDIO.items())
         or not isinstance(hashes, dict)
         or hashes.get("wav_sha256") != hashlib.sha256(wav_bytes).hexdigest()
         or hashes.get("validated_plan_sha256") != validated_plan_sha256
@@ -2235,12 +2243,37 @@ def _validate_remotion_input_context(run_id, project_id, validated_plan_sha256,
     }
 
 
-def _validate_remotion_relative_path(value, label):
-    if not isinstance(value, str) or not value or "\\" in value:
+def _validate_remotion_relative_path(value, label, *, root=None):
+    if (
+        not isinstance(value, str) or not value or "\x00" in value
+        or "\\" in value or ":" in value or value.startswith("/")
+    ):
         raise ValueError(f"{label} must be a safe project-relative POSIX path")
-    path = PurePosixPath(value)
-    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
-        raise ValueError(f"{label} must be a safe project-relative POSIX path")
+    parts = value.split("/")
+    reserved_device_name = re.compile(r"(?i)^(?:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])$")
+    if any(
+        part in {"", ".", ".."} or part.endswith((" ", "."))
+        or any(ord(character) < 32 or character in '<>"|?*' for character in part)
+        or reserved_device_name.fullmatch(part.split(".", 1)[0].rstrip(" ."))
+        for part in parts
+    ):
+        raise ValueError(f"{label} must be a safe canonical project-relative POSIX path")
+    if root is not None:
+        project_root = Path(root)
+        root_entry = _inspect_path(project_root)
+        if root_entry is None or not stat.S_ISDIR(root_entry.st_mode):
+            raise ValueError(f"{label} root must be a regular directory")
+        resolved_root = project_root.resolve()
+        current = project_root
+        for index, part in enumerate(parts):
+            current = current / part
+            entry = _inspect_path(current)
+            if entry is not None and index < len(parts) - 1 and not stat.S_ISDIR(entry.st_mode):
+                raise ValueError(f"{label} parent component is not a directory")
+        try:
+            current.resolve().relative_to(resolved_root)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ValueError(f"{label} escapes its project root or crosses a link") from exc
     return value
 
 
@@ -2335,6 +2368,195 @@ def _validate_remotion_worker_response(data, expected_run_id):
     ):
         raise ValueError("Remotion worker response does not match the fixed run/output contract")
     return response
+
+
+def _fraction(value, label):
+    try:
+        if isinstance(value, str) and "/" in value:
+            numerator, denominator = value.split("/", 1)
+            result = Fraction(int(numerator), int(denominator))
+        else:
+            result = Fraction(Decimal(str(value)))
+    except (ValueError, ZeroDivisionError, InvalidOperation, TypeError) as exc:
+        raise ValueError(f"ffprobe {label} must be a finite rational number") from exc
+    return result
+
+
+def _validate_remotion_ffprobe(data, *, expected_size_bytes):
+    if not isinstance(data, bytes) or len(data) > REMOTION_MAX_FFPROBE_BYTES:
+        raise ValueError("ffprobe JSON exceeds its maximum size")
+    try:
+        probe = STORYBOARD_VALIDATOR.parse_json(data.decode("utf-8", errors="strict"))
+    except (UnicodeError, ValueError) as exc:
+        raise ValueError("ffprobe response must be strict UTF-8 JSON") from exc
+    if not isinstance(probe, dict) or not isinstance(probe.get("format"), dict):
+        raise ValueError("ffprobe response is missing container metadata")
+    media_format = probe["format"]
+    format_name = media_format.get("format_name")
+    try:
+        format_size = int(media_format.get("size"))
+    except (ValueError, TypeError) as exc:
+        raise ValueError("ffprobe container size is malformed") from exc
+    container_duration = _fraction(media_format.get("duration"), "container duration")
+    if (
+        not isinstance(format_name, str) or "mp4" not in format_name.split(",")
+        or format_size != expected_size_bytes or format_size < 1 or format_size > REMOTION_MAX_MP4_BYTES
+        or container_duration < 2 or container_duration > Fraction(2) + Fraction(2048, 48000)
+    ):
+        raise ValueError("ffprobe container does not match the bounded MP4 contract")
+
+    streams = probe.get("streams")
+    packets = probe.get("packets")
+    if not isinstance(streams, list) or len(streams) != 2 or not isinstance(packets, list):
+        raise ValueError("ffprobe must report exactly one video stream, one audio stream, and packets")
+    video_streams = [item for item in streams if isinstance(item, dict) and item.get("codec_type") == "video"]
+    audio_streams = [item for item in streams if isinstance(item, dict) and item.get("codec_type") == "audio"]
+    if len(video_streams) != 1 or len(audio_streams) != 1:
+        raise ValueError("ffprobe must report exactly one video and one audio stream")
+    video, audio = video_streams[0], audio_streams[0]
+    video_index, audio_index = video.get("index"), audio.get("index")
+    if type(video_index) is not int or type(audio_index) is not int or video_index == audio_index:
+        raise ValueError("ffprobe stream indices are malformed")
+
+    video_time_base = _fraction(video.get("time_base"), "video time_base")
+    try:
+        video_duration = Fraction(int(video["duration_ts"])) * video_time_base
+        video_frames = int(video["nb_read_frames"])
+    except (KeyError, TypeError, ValueError, ZeroDivisionError) as exc:
+        raise ValueError("ffprobe video timestamp or frame count is missing") from exc
+    if (
+        video.get("codec_name") != "h264" or video.get("pix_fmt") != "yuv420p"
+        or video.get("width") != REMOTION_WIDTH or video.get("height") != REMOTION_HEIGHT
+        or video.get("r_frame_rate") != "12/1" or video.get("avg_frame_rate") != "12/1"
+        or video_frames != REMOTION_FRAME_COUNT or _fraction(video.get("start_time"), "video start_time") != 0
+        or abs(video_duration - 2) > video_time_base
+    ):
+        raise ValueError("ffprobe video stream violates the H.264 540x960/12 FPS/24-frame contract")
+
+    audio_time_base = _fraction(audio.get("time_base"), "audio time_base")
+    try:
+        audio_duration_samples = Fraction(int(audio["duration_ts"])) * audio_time_base * 48000
+    except (KeyError, TypeError, ValueError, ZeroDivisionError) as exc:
+        raise ValueError("ffprobe audio presentation duration is missing") from exc
+    if (
+        audio.get("codec_name") != "aac" or audio.get("profile") != "LC"
+        or audio.get("sample_rate") != "48000" or audio.get("channels") != 1
+        or _fraction(audio.get("start_time"), "audio start_time") != 0
+        or audio_duration_samples != 96000
+    ):
+        raise ValueError("ffprobe audio stream violates the AAC-LC mono/48 kHz/96,000-sample contract")
+
+    video_packets = [item for item in packets if isinstance(item, dict) and item.get("stream_index") == video_index]
+    audio_packets = [item for item in packets if isinstance(item, dict) and item.get("stream_index") == audio_index]
+    if len(video_packets) != REMOTION_FRAME_COUNT or not audio_packets:
+        raise ValueError("ffprobe packet count does not match the fixed video/audio streams")
+    try:
+        decoded_video = sorted(
+            (int(item["pts"]) * video_time_base, int(item["duration"]) * video_time_base)
+            for item in video_packets
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("ffprobe video packet timestamps are malformed") from exc
+    if any(
+        pts != Fraction(index, REMOTION_FPS) or duration != Fraction(1, REMOTION_FPS)
+        for index, (pts, duration) in enumerate(decoded_video)
+    ):
+        raise ValueError("ffprobe video packet timestamps are discontinuous or out of contract")
+
+    audio_packet_samples = []
+    priming_samples = 0
+    padding_samples = 0
+    has_priming_metadata = False
+    has_padding_metadata = False
+    try:
+        for packet in audio_packets:
+            pts = int(packet["pts"])
+            duration = int(packet["duration"])
+            duration_samples = Fraction(duration) * audio_time_base * 48000
+            if duration_samples.denominator != 1 or duration_samples <= 0:
+                raise ValueError("ffprobe AAC packet duration is not an integer sample count")
+            audio_packet_samples.append((pts, duration, int(duration_samples)))
+            for side_data in packet.get("side_data_list", []):
+                if not isinstance(side_data, dict) or side_data.get("side_data_type") != "Skip Samples":
+                    continue
+                if "skip_samples" in side_data:
+                    has_priming_metadata = True
+                    priming_samples += int(side_data["skip_samples"])
+                if "discard_padding" in side_data:
+                    has_padding_metadata = True
+                    padding_samples += int(side_data["discard_padding"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"ffprobe AAC packet timing or priming metadata is malformed: {exc}") from exc
+    audio_packet_samples.sort(key=lambda item: item[0])
+    for previous, following in zip(audio_packet_samples, audio_packet_samples[1:]):
+        if following[0] != previous[0] + previous[1]:
+            raise ValueError("ffprobe AAC packet timestamps contain a gap or overlap")
+    coded_samples = sum(item[2] for item in audio_packet_samples)
+    if (
+        not has_priming_metadata or not has_padding_metadata or priming_samples <= 0
+        or padding_samples < 0 or padding_samples > 2048
+        or coded_samples - priming_samples - padding_samples != 96000
+    ):
+        raise ValueError("ffprobe cannot prove AAC priming/padding yields exactly 96,000 presented samples")
+    summary = {
+        "format_name": "mp4", "container_duration_seconds": float(container_duration),
+        "size_bytes": format_size,
+        "video": {"codec": "h264", "pixel_format": "yuv420p", "width": REMOTION_WIDTH,
+                  "height": REMOTION_HEIGHT, "fps_num": 12, "fps_den": 1,
+                  "frames": video_frames, "start_seconds": 0, "duration_seconds": float(video_duration)},
+        "audio": {"codec": "aac", "profile": "LC", "channels": 1, "sample_rate_hz": 48000,
+                  "presented_samples": 96000, "coded_samples": coded_samples,
+                  "priming_samples": priming_samples, "padding_samples": padding_samples,
+                  "packet_count": len(audio_packet_samples), "start_seconds": 0},
+    }
+    _validate_remotion_ffprobe_summary(summary, expected_size_bytes=expected_size_bytes)
+    return summary
+
+
+def _validate_remotion_ffprobe_summary(summary, *, expected_size_bytes):
+    top_fields = {"format_name", "container_duration_seconds", "size_bytes", "video", "audio"}
+    video_fields = {
+        "codec", "pixel_format", "width", "height", "fps_num", "fps_den", "frames",
+        "start_seconds", "duration_seconds",
+    }
+    audio_fields = {
+        "codec", "profile", "channels", "sample_rate_hz", "presented_samples", "coded_samples",
+        "priming_samples", "padding_samples", "packet_count", "start_seconds",
+    }
+    if (
+        not isinstance(summary, dict) or set(summary) != top_fields
+        or not isinstance(summary.get("video"), dict) or set(summary["video"]) != video_fields
+        or not isinstance(summary.get("audio"), dict) or set(summary["audio"]) != audio_fields
+    ):
+        raise ValueError("ffprobe evidence summary has missing or unknown fields")
+    duration = summary.get("container_duration_seconds")
+    video_duration = summary["video"].get("duration_seconds")
+    numeric_values = (duration, video_duration, summary["video"].get("start_seconds"), summary["audio"].get("start_seconds"))
+    if any(type(value) not in (int, float) or not math.isfinite(value) for value in numeric_values):
+        raise ValueError("ffprobe evidence timestamps must be finite numbers")
+    if (
+        summary.get("format_name") != "mp4" or summary.get("size_bytes") != expected_size_bytes
+        or not 1 <= expected_size_bytes <= REMOTION_MAX_MP4_BYTES
+        or not 2 <= duration <= 2 + 2048 / 48000
+        or summary["video"].get("codec") != "h264" or summary["video"].get("pixel_format") != "yuv420p"
+        or summary["video"].get("width") != REMOTION_WIDTH or summary["video"].get("height") != REMOTION_HEIGHT
+        or summary["video"].get("fps_num") != REMOTION_FPS or summary["video"].get("fps_den") != 1
+        or summary["video"].get("frames") != REMOTION_FRAME_COUNT
+        or summary["video"].get("start_seconds") != 0
+        or abs(video_duration - 2) > 1 / REMOTION_FPS
+        or summary["audio"].get("codec") != "aac" or summary["audio"].get("profile") != "LC"
+        or summary["audio"].get("channels") != 1 or summary["audio"].get("sample_rate_hz") != 48000
+        or summary["audio"].get("presented_samples") != 96000 or summary["audio"].get("start_seconds") != 0
+        or type(summary["audio"].get("coded_samples")) is not int
+        or type(summary["audio"].get("priming_samples")) is not int
+        or type(summary["audio"].get("padding_samples")) is not int
+        or summary["audio"]["priming_samples"] <= 0
+        or not 0 <= summary["audio"]["padding_samples"] <= 2048
+        or summary["audio"]["coded_samples"] - summary["audio"]["priming_samples"]
+        - summary["audio"]["padding_samples"] != 96000
+        or type(summary["audio"].get("packet_count")) is not int or summary["audio"]["packet_count"] < 1
+    ):
+        raise ValueError("ffprobe evidence summary violates the fixed MP4/AAC presentation contract")
 
 
 def _validate_remotion_runtime_identity(identity):
@@ -2511,6 +2733,116 @@ def _preflight_remotion_runtime(node_path, ffprobe_path, package_path, lock_path
 def _validate_remotion_runtime_path(value, label):
     path, _, _ = _hash_local_runtime_file(value, label, 1024 * 1024 * 1024)
     return path
+
+
+def _remotion_worker_paths():
+    worker_root = Path(__file__).resolve().parents[1] / "workers" / "remotion"
+    return worker_root, worker_root / "worker.mjs", worker_root / "package.json", worker_root / "package-lock.json"
+
+
+def _verify_remotion_installation(worker_root):
+    package_bytes = _read_bounded_regular_file(
+        Path(worker_root) / "package.json", REMOTION_MAX_DEPENDENCY_MANIFEST_BYTES,
+        "Remotion package manifest", require_identity=True,
+    )
+    package, _ = _validate_remotion_dependency_contract(
+        package_bytes,
+        _read_bounded_regular_file(
+            Path(worker_root) / "package-lock.json", REMOTION_MAX_DEPENDENCY_LOCK_BYTES,
+            "Remotion dependency lockfile", require_identity=True,
+        ),
+    )
+    for name, expected_version in package["dependencies"].items():
+        manifest_path = Path(worker_root) / "node_modules" / Path(*name.split("/")) / "package.json"
+        installed_bytes = _read_bounded_regular_file(
+            manifest_path, REMOTION_MAX_DEPENDENCY_MANIFEST_BYTES,
+            f"installed Remotion dependency {name}", require_identity=True,
+        )
+        try:
+            installed = STORYBOARD_VALIDATOR.parse_json(installed_bytes.decode("utf-8", errors="strict"))
+        except (UnicodeError, ValueError) as exc:
+            raise ValueError(f"installed Remotion dependency {name} has invalid package metadata") from exc
+        if not isinstance(installed, dict) or installed.get("name") != name or installed.get("version") != expected_version:
+            raise ValueError(f"installed Remotion dependency {name} does not match pinned version {expected_version}")
+
+
+def _run_remotion_process(command, cwd, *, timeout_seconds, max_output_bytes=0):
+    """Run one fixed child, suppress worker logs or bound probe JSON, kill its process tree on stop."""
+    environment = os.environ.copy()
+    for name in list(environment):
+        upper = name.upper()
+        if upper in {
+            "NODE_OPTIONS", "NODE_PATH", "NODE_PRESERVE_SYMLINKS", "HTTP_PROXY", "HTTPS_PROXY",
+            "ALL_PROXY", "NO_PROXY", "REMOTION_TELEMETRY_ENABLED",
+        } or upper.startswith("NPM_CONFIG_"):
+            environment.pop(name, None)
+    environment["REMOTION_TELEMETRY_ENABLED"] = "0"
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    capture = max_output_bytes > 0
+    options = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.PIPE if capture else subprocess.DEVNULL,
+        "stderr": subprocess.PIPE if capture else subprocess.DEVNULL,
+        "shell": False, "cwd": cwd, "env": environment,
+    }
+    if os.name == "nt":
+        options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+    else:
+        options["start_new_session"] = True
+    try:
+        process = subprocess.Popen([str(item) for item in command], **options)
+    except OSError as exc:
+        raise ValueError(f"Remotion subprocess could not start: {exc}") from exc
+    windows_job = None
+    outputs = {"stdout": bytearray(), "stderr": bytearray()}
+    overflow = threading.Event()
+    readers = []
+    try:
+        if os.name == "nt":
+            try:
+                windows_job = _attach_windows_job(process)
+            except Exception:
+                _terminate_blender_process_tree(process)
+                raise
+        if capture:
+            def read_pipe(name):
+                while True:
+                    chunk = getattr(process, name).read(4096)
+                    if not chunk:
+                        return
+                    if len(outputs["stdout"]) + len(outputs["stderr"]) + len(chunk) > max_output_bytes:
+                        overflow.set()
+                        return
+                    outputs[name].extend(chunk)
+
+            for name in ("stdout", "stderr"):
+                reader = threading.Thread(target=read_pipe, args=(name,), name=f"remotion-{name}", daemon=True)
+                reader.start()
+                readers.append(reader)
+        deadline = time.monotonic() + timeout_seconds
+        while process.poll() is None and not overflow.is_set() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if overflow.is_set():
+            _terminate_blender_process_tree(process, windows_job)
+            raise ValueError(f"Remotion subprocess output exceeds {max_output_bytes} bytes")
+        if process.poll() is None:
+            _terminate_blender_process_tree(process, windows_job)
+            raise ValueError(f"Remotion subprocess exceeded {timeout_seconds} seconds; no retry was attempted")
+        for reader in readers:
+            reader.join(timeout=1)
+        if any(reader.is_alive() for reader in readers):
+            _terminate_blender_process_tree(process, windows_job)
+            raise ValueError("Remotion subprocess output reader did not finish")
+        if process.returncode != 0:
+            raise ValueError(f"Remotion subprocess failed with exit code {process.returncode}; no retry was attempted")
+        return bytes(outputs["stdout"]), bytes(outputs["stderr"])
+    except KeyboardInterrupt as exc:
+        if process.poll() is None:
+            _terminate_blender_process_tree(process, windows_job)
+        raise ValueError("Remotion subprocess was cancelled; no retry was attempted") from exc
+    finally:
+        if windows_job is not None:
+            windows_job.close()
 
 
 def _create_remotion_staging(project_root, run_id):
@@ -2908,15 +3240,57 @@ def _is_productive_scenes_config(config):
         if blender is None or blender.get("adapter_status") != "implemented" or blender.get("availability") != "verified":
             return False
     return all(
-        stage_id in {"01-validate-project", "02-blender-scenes"}
+        stage_id in {"01-validate-project", "02-blender-scenes", "04-remotion-compose"}
         or (stage_id == TTS_NARRATION_STAGE_ID and _has_productive_combined_contract(config))
         or stage.get("adapter_status") == "pending"
         for stage_id, stage in by_id.items()
     )
 
 
+def _is_productive_remotion_stage_config(config):
+    stages, tools = _profile_stage_map(config), _profile_tool_map(config)
+    if stages is None or tools is None:
+        return False
+    stage = stages.get("04-remotion-compose", {})
+    outputs = stage.get("outputs")
+    if (
+        stage.get("adapter") != "remotion-compose"
+        or stage.get("adapter_status") != "implemented"
+        or stage.get("depends_on") != ["02-blender-scenes", TTS_NARRATION_STAGE_ID]
+        or not isinstance(stage.get("inputs"), list)
+        or any(not isinstance(input_id, str) for input_id in stage["inputs"])
+        or set(stage["inputs"]) != set(REMOTION_STAGE04_INPUTS)
+        or len(stage["inputs"]) != len(REMOTION_STAGE04_INPUTS)
+        or stage.get("tools") != ["remotion", "ffprobe"]
+        or not isinstance(outputs, list) or len(outputs) != 2
+    ):
+        return False
+    output_by_id = {item.get("id"): item.get("path") for item in outputs if isinstance(item, dict)}
+    if set(output_by_id) != set(REMOTION_STAGE04_OUTPUTS):
+        return False
+    if any(
+        not isinstance(path, str) or not path.startswith(".pipeline/work/")
+        or Path(path).suffix.lower() != extension
+        for output_id, path in output_by_id.items()
+        for extension in ({"composite": ".mp4", "composition-provenance": ".json"}[output_id],)
+    ):
+        return False
+    return (
+        tools.get("remotion", {}).get("executable") == "node"
+        and tools.get("remotion", {}).get("version_requirement")
+        == "Remotion 4.0.540; React 19.3.1; Node.js LTS 22/24/26"
+        and tools.get("ffprobe", {}).get("executable") == "ffprobe"
+        and tools.get("ffprobe", {}).get("version_requirement") == ">=4.1.0"
+        and all(
+            tools.get(tool_id, {}).get("adapter_status") == "implemented"
+            and tools.get(tool_id, {}).get("availability") == "verified"
+            for tool_id in ("remotion", "ffprobe")
+        )
+    )
+
+
 def _has_productive_combined_contract(config):
-    """Recognize the complete 5C.2 declaration; this does not authorize Stage 04."""
+    """Recognize the combined profile before or after Stage 04 implementation."""
     by_id = _profile_stage_map(config)
     if by_id is None:
         return False
@@ -2930,8 +3304,11 @@ def _has_productive_combined_contract(config):
         and stage01.get("adapter_status") == "implemented"
         and stage02.get("adapter_status") == "implemented"
         and stage03.get("adapter_status") == "implemented"
-        and stage04.get("adapter_status") == "pending"
+        and stage04.get("adapter_status") in {"pending", "implemented"}
     ):
+        return False
+    stage04_implemented = stage04.get("adapter_status") == "implemented"
+    if stage04_implemented and not _is_productive_remotion_stage_config(config):
         return False
     for stage_id in ("05-ffmpeg-finalize", "06-quality-control"):
         if by_id.get(stage_id, {}).get("adapter_status") != "pending":
@@ -2943,8 +3320,14 @@ def _has_productive_combined_contract(config):
     return (
         blender.get("availability") == "verified" and blender.get("adapter_status") == "implemented"
         and kokoro.get("availability") == "verified" and kokoro.get("adapter_status") == "implemented"
-        and _profile_inactive_stages_pending(by_id, {"01-validate-project", "02-blender-scenes", TTS_NARRATION_STAGE_ID})
-        and _profile_inactive_tools_pending(by_id, tools, {"blender", "kokoro"})
+        and _profile_inactive_stages_pending(
+            by_id, {"01-validate-project", "02-blender-scenes", TTS_NARRATION_STAGE_ID}
+            | ({"04-remotion-compose"} if stage04_implemented else set()),
+        )
+        and _profile_inactive_tools_pending(
+            by_id, tools, {"blender", "kokoro"}
+            | ({"remotion", "ffprobe"} if stage04_implemented else set()),
+        )
     )
 
 
@@ -3757,6 +4140,137 @@ def new_pending_manifest(config, config_path):
     }
 
 
+def _validate_remotion_stage04_manifest_context(config, config_path, manifest, stage04_entry):
+    stage_entries = manifest["stages"]
+    artifacts = {item["id"]: item for item in stage04_entry["artifacts"] if isinstance(item, dict)}
+    try:
+        provenance_artifact = artifacts["composition-provenance"]
+        video_artifact = artifacts["composite"]
+        provenance_path = _path(
+            Path(config_path).resolve().parent, provenance_artifact["path"],
+            "manifest composition-provenance path", [], required_file=True,
+        )
+        video_path = _path(
+            Path(config_path).resolve().parent, video_artifact["path"],
+            "manifest composite path", [], required_file=True,
+        )
+        if provenance_path is None or video_path is None:
+            raise ValueError("Stage 04 outputs are unavailable")
+        provenance, provenance_bytes = _read_strict_bounded_json(
+            provenance_path, REMOTION_MAX_PROVENANCE_BYTES, "composition-provenance",
+        )
+    except (KeyError, TypeError, OSError, ValueError) as exc:
+        raise ValueError(f"Stage 04 provenance cannot be read safely: {exc}") from exc
+    fields = {
+        "provenance_version", "record_type", "run_id", "project_id", "stage_id", "input_hashes",
+        "stage_fingerprints", "runtime", "composition", "ffprobe", "ffprobe_response_sha256",
+        "output", "timeout_seconds", "attempts", "automatic_retries",
+    }
+    if not isinstance(provenance, dict) or set(provenance) != fields:
+        raise ValueError("Stage 04 provenance has missing or unknown fields")
+    expected_inputs = {
+        "validated-plan": next(item["sha256"] for item in stage_entries["01-validate-project"]["artifacts"]
+                                if item["id"] == "validated-plan"),
+        "storyboard": _project_input_hashes(config, config_path)["storyboard"],
+        "scene-package": next(item["sha256"] for item in stage_entries["02-blender-scenes"]["artifacts"]
+                               if item["id"] == "scene-package"),
+        "narration": next(item["sha256"] for item in stage_entries[TTS_NARRATION_STAGE_ID]["artifacts"]
+                           if item["id"] == "narration"),
+        "narration-provenance": next(item["sha256"] for item in stage_entries[TTS_NARRATION_STAGE_ID]["artifacts"]
+                                      if item["id"] == "narration-provenance"),
+    }
+    expected_fingerprints = {
+        "stage_01": stage_entries["01-validate-project"]["stage_fingerprint"],
+        "stage_02": stage_entries["02-blender-scenes"]["stage_fingerprint"],
+        "stage_03": stage_entries[TTS_NARRATION_STAGE_ID]["stage_fingerprint"],
+    }
+    runtime = _validate_remotion_runtime_identity(provenance["runtime"])
+    if (
+        provenance["provenance_version"] != 1
+        or provenance["record_type"] != "productive-local-remotion-composition"
+        or provenance["run_id"] != manifest["run_id"]
+        or provenance["project_id"] != config["project"]["id"]
+        or provenance["stage_id"] != "04-remotion-compose"
+        or provenance["input_hashes"] != expected_inputs
+        or provenance["stage_fingerprints"] != expected_fingerprints
+        or provenance["timeout_seconds"] != REMOTION_WORKER_TIMEOUT_SECONDS
+        or provenance["attempts"] != 1 or provenance["automatic_retries"] is not False
+        or not isinstance(provenance["ffprobe_response_sha256"], str)
+        or not REMOTION_HASH.fullmatch(provenance["ffprobe_response_sha256"])
+    ):
+        raise ValueError("Stage 04 provenance does not match this run, project, inputs, or fixed execution policy")
+    try:
+        size = video_path.stat().st_size
+    except OSError as exc:
+        raise ValueError("published Stage 04 MP4 cannot be inspected") from exc
+    output = provenance["output"]
+    if (
+        not isinstance(output, dict) or set(output) != {"size_bytes", "sha256"}
+        or output["size_bytes"] != size or not 1 <= size <= REMOTION_MAX_MP4_BYTES
+        or output["sha256"] != video_artifact["sha256"]
+    ):
+        raise ValueError("Stage 04 provenance output does not match the published MP4 artifact")
+    composition = provenance["composition"]
+    composition_fields = {
+        "width", "height", "fps_num", "fps_den", "frame_count", "logical_video_duration_ms",
+        "source_samples", "source_sample_rate_hz", "silence_samples", "audio_output_sample_rate_hz",
+        "audio_presented_samples", "padding_policy", "captions", "anchors",
+    }
+    if not isinstance(composition, dict) or set(composition) != composition_fields:
+        raise ValueError("Stage 04 composition evidence has missing or unknown fields")
+    if any(composition.get(key) != expected for key, expected in {
+        "width": REMOTION_WIDTH, "height": REMOTION_HEIGHT, "fps_num": REMOTION_FPS, "fps_den": 1,
+        "frame_count": REMOTION_FRAME_COUNT, "logical_video_duration_ms": 2000,
+        "source_sample_rate_hz": REMOTION_SAMPLE_RATE, "audio_output_sample_rate_hz": 48000,
+        "audio_presented_samples": 96000,
+        "padding_policy": "zero-pad-source-wav-to-48000-samples; resample-24k-to-48k-for-aac",
+    }.items()):
+        raise ValueError("Stage 04 composition evidence violates the fixed two-second contract")
+    if (
+        type(composition.get("source_samples")) is not int
+        or not 1 <= composition["source_samples"] <= REMOTION_MAX_SAMPLES
+        or composition.get("silence_samples") != REMOTION_MAX_SAMPLES - composition["source_samples"]
+    ):
+        raise ValueError("Stage 04 composition audio sample evidence is invalid")
+    storyboard_path = Path(config_path).resolve().parent.joinpath(*PurePosixPath(config["project"]["storyboard"]).parts)
+    storyboard, _ = _read_strict_bounded_json(
+        storyboard_path, MAX_PRODUCTIVE_STORYBOARD_BYTES, "current storyboard",
+    )
+    narration_artifacts = {item["id"]: item for item in stage_entries[TTS_NARRATION_STAGE_ID]["artifacts"]}
+    root = Path(config_path).resolve().parent
+    wav_path = root.joinpath(*PurePosixPath(narration_artifacts["narration"]["path"]).parts)
+    narration_provenance_path = root.joinpath(*PurePosixPath(narration_artifacts["narration-provenance"]["path"]).parts)
+    wav_bytes = _read_bounded_regular_file(wav_path, MAX_KOKORO_WAV_BYTES, "manifest narration", require_identity=True)
+    narration_provenance, _ = _read_strict_bounded_json(
+        narration_provenance_path, MAX_KOKORO_PROVENANCE_BYTES, "manifest narration provenance",
+    )
+    timeline = _validate_remotion_timeline(
+        config, storyboard, wav_bytes, narration_provenance,
+        run_id=manifest["run_id"], project_id=config["project"]["id"],
+        validated_plan_sha256=expected_inputs["validated-plan"],
+    )
+    expected_captions = [{key: item[key] for key in ("caption_index", "start_frame", "end_frame_exclusive")}
+                         for item in timeline["captions"]]
+    if (
+        composition["source_samples"] != timeline["source_samples"]
+        or composition["captions"] != expected_captions
+        or composition["anchors"] != timeline["anchors"]
+    ):
+        raise ValueError("Stage 04 composition timing evidence disagrees with the current storyboard and WAV")
+    _validate_remotion_ffprobe_summary(provenance["ffprobe"], expected_size_bytes=size)
+    tool_versions = stage_entries["04-remotion-compose"]["tool_versions"]
+    expected_tool_versions = {
+        "remotion": json.dumps({key: runtime[key] for key in (
+            "node_version", "remotion_version", "node_sha256", "remotion_lock_sha256", "worker_sha256",
+        )}, sort_keys=True, separators=(",", ":")),
+        "ffprobe": json.dumps({"version": runtime["ffprobe_version"],
+                                "sha256": runtime["ffprobe_sha256"]}, sort_keys=True, separators=(",", ":")),
+    }
+    if tool_versions != expected_tool_versions:
+        raise ValueError("Stage 04 manifest tool versions disagree with recorded runtime hashes")
+    return provenance, provenance_bytes
+
+
 def validate_manifest(manifest, config, config_path, manifest_path):
     errors, warnings = [], []
     if not _object(
@@ -3951,6 +4465,8 @@ def validate_manifest(manifest, config, config_path, manifest_path):
     combined_profile = _classify_productive_profile(config) == "audiovisual-combined"
     if productive_tts or productive_scenes:
         pending_stage_ids = {"04-remotion-compose", "05-ffmpeg-finalize", "06-quality-control"}
+        if combined_profile and configured.get("04-remotion-compose", {}).get("adapter_status") == "implemented":
+            pending_stage_ids.remove("04-remotion-compose")
         if not combined_profile and (productive_tts or configured["02-blender-scenes"]["adapter_status"] == "pending"):
             pending_stage_ids.add("02-blender-scenes")
         if productive_scenes and not combined_profile:
@@ -4015,6 +4531,15 @@ def validate_manifest(manifest, config, config_path, manifest_path):
                 )
             except (KeyError, TypeError, OSError, ValueError) as exc:
                 errors.append(f"manifest narration does not match Kokoro provenance: {exc}")
+        remotion_entry = stage_entries.get("04-remotion-compose")
+        if (
+            combined_profile and configured.get("04-remotion-compose", {}).get("adapter_status") == "implemented"
+            and isinstance(remotion_entry, dict) and remotion_entry.get("status") == "completed"
+        ):
+            try:
+                _validate_remotion_stage04_manifest_context(config, config_path, manifest, remotion_entry)
+            except (KeyError, StopIteration, TypeError, OSError, ValueError) as exc:
+                errors.append(f"manifest Stage 04 outputs do not match composition provenance: {exc}")
     return errors, warnings
 
 
@@ -4207,6 +4732,285 @@ def _write_scene_checkpoint(path, manifest, expected_identity):
     return identity
 
 
+def _read_strict_bounded_json(path, maximum_size, label):
+    payload = _read_bounded_regular_file(path, maximum_size, label, require_identity=True)
+    try:
+        value = STORYBOARD_VALIDATOR.parse_json(payload.decode("utf-8", errors="strict"))
+    except (UnicodeError, ValueError) as exc:
+        raise ValueError(f"{label} must be strict UTF-8 JSON: {exc}") from exc
+    return value, payload
+
+
+def _extract_remotion_frames(archive_path, scene_id, staging_root):
+    frame_hashes = []
+    with zipfile.ZipFile(archive_path, "r", allowZip64=False) as archive:
+        for frame in range(REMOTION_FRAME_COUNT):
+            member_name = f"scenes/{scene_id}/frames/frame-{frame:06d}.png"
+            info = archive.getinfo(member_name)
+            if info.file_size < 33 or info.file_size > REMOTION_MAX_FRAME_BYTES:
+                raise ValueError(f"scene-package frame {frame} exceeds its PNG size bounds")
+            with archive.open(info, "r") as stream:
+                frame_bytes = stream.read(REMOTION_MAX_FRAME_BYTES + 1)
+                if len(frame_bytes) != info.file_size or stream.read(1):
+                    raise ValueError(f"scene-package frame {frame} changed or expanded beyond its declared size")
+            if frame_bytes[:8] != b"\x89PNG\r\n\x1a\n":
+                raise ValueError(f"scene-package frame {frame} is not a PNG")
+            relative = f"frames/frame-{frame:06d}.png"
+            _validate_remotion_relative_path(relative, "Remotion staged frame", root=staging_root)
+            destination = Path(staging_root).joinpath(*relative.split("/"))
+            _ensure_project_output_directory(staging_root, ("frames",))
+            owned = {}
+            _write_exclusive_file(destination, frame_bytes, owned)
+            if _file_identity(_inspect_path(destination)) != owned[destination]:
+                raise ValueError(f"Remotion staged frame {frame} identity changed after write")
+            frame_hashes.append(hashlib.sha256(frame_bytes).hexdigest())
+    return frame_hashes
+
+
+def _run_remotion_stage04(config, config_path, manifest, *, node_path, ffprobe_path,
+                          input_hashes, input_snapshot, stage04_paths, output_owned,
+                          preflight_identity):
+    """Compose a fixed timeline in private staging, then validate and publish Stage 04 exclusively."""
+    root = Path(config_path).resolve().parent
+    stage01 = manifest["stages"]["01-validate-project"]
+    stage02 = manifest["stages"]["02-blender-scenes"]
+    stage03 = manifest["stages"][TTS_NARRATION_STAGE_ID]
+    stage04 = _productive_stage(config, "04-remotion-compose")
+    if any(manifest["stages"][stage_id]["status"] != "completed" for stage_id in (
+        "01-validate-project", "02-blender-scenes", TTS_NARRATION_STAGE_ID,
+    )):
+        raise ValueError("Stage 04 requires verified Stage 01, Stage 02, and Stage 03 checkpoints")
+    for output_path in stage04_paths.values():
+        _preflight_productive_path(output_path, "Remotion Stage 04 output")
+    worker_root, worker_path, package_path, lock_path = _remotion_worker_paths()
+    _verify_remotion_installation(worker_root)
+    runtime_identity = preflight_identity
+    if _preflight_remotion_runtime(node_path, ffprobe_path, package_path, lock_path, worker_path) != runtime_identity:
+        raise ValueError("Remotion runtime, lockfile, worker, or ffprobe changed before Stage 04")
+    staging_root = _create_remotion_staging(root, manifest["run_id"])
+    stage01_artifact = next(item for item in stage01["artifacts"] if item["id"] == "validated-plan")
+    stage02_artifact = next(item for item in stage02["artifacts"] if item["id"] == "scene-package")
+    stage03_artifacts = {item["id"]: item for item in stage03["artifacts"]}
+    source_paths = {
+        "validated-plan": root.joinpath(*PurePosixPath(stage01_artifact["path"]).parts),
+        "storyboard": root.joinpath(*PurePosixPath(config["project"]["storyboard"]).parts),
+        "scene-package": root.joinpath(*PurePosixPath(stage02_artifact["path"]).parts),
+        "narration": root.joinpath(*PurePosixPath(stage03_artifacts["narration"]["path"]).parts),
+        "narration-provenance": root.joinpath(*PurePosixPath(stage03_artifacts["narration-provenance"]["path"]).parts),
+    }
+    source_limits = {
+        "validated-plan": MAX_VALIDATED_PLAN_BYTES, "storyboard": MAX_PRODUCTIVE_STORYBOARD_BYTES,
+        "scene-package": MAX_ARCHIVE_BYTES, "narration": MAX_KOKORO_WAV_BYTES,
+        "narration-provenance": MAX_KOKORO_PROVENANCE_BYTES,
+    }
+    input_artifact_hashes = {
+        "validated-plan": stage01_artifact["sha256"],
+        "storyboard": input_hashes["storyboard"],
+        "scene-package": stage02_artifact["sha256"],
+        "narration": stage03_artifacts["narration"]["sha256"],
+        "narration-provenance": stage03_artifacts["narration-provenance"]["sha256"],
+    }
+    staged_inputs = {
+        "validated-plan": "validated-plan.json", "storyboard": "storyboard.json",
+        "scene-package": "scene-package.zip", "narration": "narration.wav",
+        "narration-provenance": "narration-provenance.json",
+    }
+    staged_identities = {}
+    staged_hashes = {}
+    parsed_inputs = {}
+    for input_id, relative in staged_inputs.items():
+        _validate_remotion_relative_path(relative, f"Remotion input {input_id}", root=staging_root)
+        destination = staging_root / relative
+        if input_id == "scene-package":
+            staged_identities.update(_copy_exclusive_archive(source_paths[input_id], destination))
+            digest = sha256_file(destination)
+            if digest != input_artifact_hashes[input_id]:
+                raise ValueError("Stage 04 scene-package changed after its producer checkpoint")
+            staged_hashes[input_id] = digest
+            continue
+        payload = _read_bounded_regular_file(
+            source_paths[input_id], source_limits[input_id], f"Stage 04 {input_id}", require_identity=True,
+        )
+        digest = hashlib.sha256(payload).hexdigest()
+        if digest != input_artifact_hashes[input_id]:
+            raise ValueError(f"Stage 04 input {input_id} changed after its producer checkpoint")
+        _write_exclusive_file(destination, payload, staged_identities)
+        staged_hashes[input_id] = digest
+        if input_id in {"validated-plan", "storyboard", "narration-provenance"}:
+            value, _ = _read_strict_bounded_json(destination, source_limits[input_id], f"staged {input_id}")
+            parsed_inputs[input_id] = value
+
+    archive_digest = staged_hashes["scene-package"]
+    scene_runtime_text = stage02["tool_versions"]["blender"]
+    scene_runtime = STORYBOARD_VALIDATOR.parse_json(scene_runtime_text)
+    if not isinstance(scene_runtime, dict):
+        raise ValueError("Blender stage tool identity is malformed")
+    scene_context = _scene_package_context(config, config_path, manifest, archive_digest, scene_runtime)
+    staged_scene_package = staging_root / staged_inputs["scene-package"]
+    with staged_scene_package.open("rb") as stream:
+        package_result = validate_scene_package(stream, expected_context=scene_context)
+    if package_result.archive_sha256 != archive_digest:
+        raise ValueError("scene-package changed after contextual validation")
+    with zipfile.ZipFile(staged_scene_package, "r", allowZip64=False) as archive:
+        scene_provenance_bytes = archive.read("provenance.json")
+    if len(scene_provenance_bytes) > MAX_BLENDER_SCENE_SPEC_BYTES:
+        raise ValueError("scene-package provenance exceeds its JSON size limit")
+    scene_provenance = STORYBOARD_VALIDATOR.parse_json(scene_provenance_bytes.decode("utf-8", errors="strict"))
+    wav_bytes = _read_bounded_regular_file(
+        source_paths["narration"], MAX_KOKORO_WAV_BYTES, "Stage 04 narration", require_identity=True,
+    )
+    audio = _inspect_kokoro_wav(wav_bytes)
+    narration_provenance = parsed_inputs["narration-provenance"]
+    plan_hash = input_artifact_hashes["validated-plan"]
+    storyboard_hash = input_artifact_hashes["storyboard"]
+    input_context = _validate_remotion_input_context(
+        manifest["run_id"], config["project"]["id"], plan_hash,
+        stage01["stage_fingerprint"], stage02["stage_fingerprint"],
+        archive_digest, storyboard_hash, wav_bytes, scene_provenance, narration_provenance,
+    )
+    timeline = _validate_remotion_timeline(
+        config, parsed_inputs["storyboard"], wav_bytes, narration_provenance,
+        run_id=manifest["run_id"], project_id=config["project"]["id"],
+        validated_plan_sha256=plan_hash,
+    )
+    frame_hashes = _extract_remotion_frames(staged_scene_package, package_result.scene_id, staging_root)
+    request = {
+        "record_type": "remotion-worker-request", "request_version": 1,
+        "project_id": config["project"]["id"], "run_id": manifest["run_id"],
+        "width": REMOTION_WIDTH, "height": REMOTION_HEIGHT, "fps": REMOTION_FPS,
+        "frames": REMOTION_FRAME_COUNT, "source_samples": audio["frames"],
+        "silence_samples": timeline["silence_samples"], "inputs": staged_inputs,
+        "captions": timeline["captions"], "anchors": timeline["anchors"],
+    }
+    request_bytes = (json.dumps(request, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    _validate_remotion_worker_request(request_bytes)
+    request_path = staging_root / "request.json"
+    request_owned = {}
+    _write_exclusive_file(request_path, request_bytes, request_owned)
+
+    if _productive_snapshot(config, config_path)[0] != input_snapshot:
+        raise ValueError("project inputs changed before Remotion worker execution")
+    _assert_productive_config_unchanged(config, config_path)
+    worker_command = [node_path, worker_path, request_path]
+    _run_remotion_process(worker_command, worker_root, timeout_seconds=REMOTION_WORKER_TIMEOUT_SECONDS)
+    _assert_productive_config_unchanged(config, config_path)
+    if _productive_snapshot(config, config_path)[0] != input_snapshot:
+        raise ValueError("project inputs changed while Remotion worker was running")
+    current_identity = _preflight_remotion_runtime(node_path, ffprobe_path, package_path, lock_path, worker_path)
+    if current_identity != runtime_identity:
+        raise ValueError("Remotion runtime, lockfile, worker, or ffprobe changed during composition")
+    _verify_remotion_installation(worker_root)
+    for input_id, relative in staged_inputs.items():
+        staged_path = staging_root / relative
+        staged_payload = _read_bounded_regular_file(
+            staged_path, source_limits[input_id], f"staged Stage 04 {input_id}", require_identity=True,
+        )
+        if hashlib.sha256(staged_payload).hexdigest() != staged_hashes[input_id]:
+            raise ValueError(f"staged Stage 04 input {input_id} changed during Remotion composition")
+    if _file_identity(_inspect_path(request_path)) != request_owned[request_path]:
+        raise ValueError("Remotion request identity changed while worker was running")
+    if hashlib.sha256(_read_bounded_regular_file(
+        request_path, REMOTION_MAX_WORKER_REQUEST_BYTES, "Remotion worker request", require_identity=True,
+    )).hexdigest() != hashlib.sha256(request_bytes).hexdigest():
+        raise ValueError("Remotion worker request changed while worker was running")
+    for frame, expected_hash in enumerate(frame_hashes):
+        relative = f"frames/frame-{frame:06d}.png"
+        frame_path = staging_root / relative
+        frame_bytes = _read_bounded_regular_file(frame_path, REMOTION_MAX_FRAME_BYTES, "staged Remotion frame")
+        if hashlib.sha256(frame_bytes).hexdigest() != expected_hash:
+            raise ValueError(f"staged Remotion frame {frame} changed during composition")
+    response_bytes = _read_bounded_regular_file(
+        staging_root / "response.json", REMOTION_MAX_WORKER_RESPONSE_BYTES,
+        "Remotion worker response", require_identity=True,
+    )
+    response = _validate_remotion_worker_response(response_bytes, manifest["run_id"])
+    mp4_path = staging_root / "composite.mp4"
+    mp4_bytes = _read_bounded_regular_file(mp4_path, REMOTION_MAX_MP4_BYTES, "staged Remotion MP4", require_identity=True)
+    mp4_hash = hashlib.sha256(mp4_bytes).hexdigest()
+    if len(mp4_bytes) != response["output_size_bytes"] or mp4_hash != response["output_sha256"]:
+        raise ValueError("Remotion MP4 does not match the worker response size and hash")
+    probe_bytes, _ = _run_remotion_process(
+        [ffprobe_path, "-v", "error", "-show_format", "-show_streams", "-show_packets",
+         "-count_frames", "-of", "json", mp4_path],
+        worker_root, timeout_seconds=REMOTION_PREFLIGHT_TIMEOUT_SECONDS,
+        max_output_bytes=REMOTION_MAX_FFPROBE_BYTES,
+    )
+    media_summary = _validate_remotion_ffprobe(probe_bytes, expected_size_bytes=len(mp4_bytes))
+    hashes = {input_id: staged_hashes[input_id] for input_id in REMOTION_STAGE04_INPUTS}
+    provenance = {
+        "provenance_version": 1, "record_type": "productive-local-remotion-composition",
+        "run_id": manifest["run_id"], "project_id": config["project"]["id"],
+        "stage_id": "04-remotion-compose", "input_hashes": hashes,
+        "stage_fingerprints": {
+            "stage_01": stage01["stage_fingerprint"], "stage_02": stage02["stage_fingerprint"],
+            "stage_03": stage03["stage_fingerprint"],
+        },
+        "runtime": runtime_identity,
+        "composition": {
+            "width": REMOTION_WIDTH, "height": REMOTION_HEIGHT, "fps_num": REMOTION_FPS,
+            "fps_den": 1, "frame_count": REMOTION_FRAME_COUNT,
+            "logical_video_duration_ms": 2000, "source_samples": audio["frames"],
+            "source_sample_rate_hz": REMOTION_SAMPLE_RATE, "silence_samples": timeline["silence_samples"],
+            "audio_output_sample_rate_hz": 48000, "audio_presented_samples": 96000,
+            "padding_policy": "zero-pad-source-wav-to-48000-samples; resample-24k-to-48k-for-aac",
+            "captions": [{key: item[key] for key in (
+                "caption_index", "start_frame", "end_frame_exclusive",
+            )} for item in timeline["captions"]],
+            "anchors": timeline["anchors"],
+        },
+        "ffprobe": media_summary,
+        "ffprobe_response_sha256": hashlib.sha256(probe_bytes).hexdigest(),
+        "output": {"size_bytes": len(mp4_bytes), "sha256": mp4_hash},
+        "timeout_seconds": REMOTION_WORKER_TIMEOUT_SECONDS, "attempts": 1, "automatic_retries": False,
+    }
+    provenance_bytes = (json.dumps(provenance, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    if len(provenance_bytes) > REMOTION_MAX_PROVENANCE_BYTES:
+        raise ValueError("Remotion composition provenance exceeds 64 KiB")
+    tool_versions = {
+        "remotion": json.dumps({key: runtime_identity[key] for key in (
+            "node_version", "remotion_version", "node_sha256", "remotion_lock_sha256", "worker_sha256",
+        )}, sort_keys=True, separators=(",", ":")),
+        "ffprobe": json.dumps({"version": runtime_identity["ffprobe_version"],
+                                "sha256": runtime_identity["ffprobe_sha256"]}, sort_keys=True, separators=(",", ":")),
+    }
+    stage04_hashes = {input_id: input_artifact_hashes[input_id] for input_id in stage04["inputs"]}
+    stage04_fingerprint = stage_fingerprint(config, stage04, stage04_hashes, tool_versions)
+    payloads = {"composite": mp4_bytes, "composition-provenance": provenance_bytes}
+    for output_id, payload in payloads.items():
+        destination = stage04_paths[output_id]
+        _ensure_project_output_directory(root, tuple(destination.relative_to(root).parts[:-1]))
+        _preflight_productive_path(destination, f"Remotion {output_id} publication")
+        _write_exclusive_file(destination, payload, output_owned)
+    published_mp4 = _read_owned_file(
+        stage04_paths["composite"], REMOTION_MAX_MP4_BYTES, output_owned[stage04_paths["composite"]],
+    )
+    published_provenance = _read_owned_file(
+        stage04_paths["composition-provenance"], REMOTION_MAX_PROVENANCE_BYTES,
+        output_owned[stage04_paths["composition-provenance"]],
+    )
+    if (
+        hashlib.sha256(published_mp4).hexdigest() != mp4_hash
+        or STORYBOARD_VALIDATOR.parse_json(published_provenance.decode("utf-8", errors="strict")) != provenance
+    ):
+        raise ValueError("published Remotion outputs failed post-publication hash or provenance verification")
+    if _productive_snapshot(config, config_path)[0] != input_snapshot:
+        raise ValueError("project inputs changed before Stage 04 checkpoint")
+    return {
+        "candidate": {
+            "status": "completed", "attempts": 1, "error": None,
+            "depends_on": stage04["depends_on"],
+            "artifacts": [
+                {"id": output_id, "path": stage04["outputs"][index]["path"],
+                 "sha256": hashlib.sha256(payload).hexdigest()}
+                for index, (output_id, payload) in enumerate(payloads.items())
+            ],
+            "stage_fingerprint": stage04_fingerprint, "tool_versions": tool_versions,
+        },
+        "provenance": provenance,
+        "media": media_summary,
+    }
+
+
 def run_productive_scenes(config_path, *, blender_path):
     """Execute Stage 01 and Stage 02 with verified exclusive ZIP publication."""
     config, errors, warnings, waves = load_and_validate_config(config_path)
@@ -4352,8 +5156,9 @@ def run_productive_scenes(config_path, *, blender_path):
         raise
 
 
-def run_productive_composition(config_path, *, python_path, model_path, voices_path, blender_path):
-    """Execute combined Stage 01, Kokoro Stage 03, and Blender Stage 02 in one run."""
+def run_productive_composition(config_path, *, python_path, model_path, voices_path, blender_path,
+                               node_path=None, ffprobe_path=None):
+    """Execute the combined 01/03/02 pipeline and Stage 04 when its adapter is enabled."""
     config, errors, warnings, waves = load_and_validate_config(config_path)
     unexpected_warnings = _unexpected_scene_warnings(config, config_path, warnings) if config is not None else warnings
     if errors or unexpected_warnings:
@@ -4365,6 +5170,10 @@ def run_productive_composition(config_path, *, python_path, model_path, voices_p
     stage01 = _productive_stage(config, "01-validate-project")
     stage02 = _productive_stage(config, "02-blender-scenes")
     stage03 = _productive_stage(config, TTS_NARRATION_STAGE_ID)
+    stage04 = _productive_stage(config, "04-remotion-compose")
+    stage04_enabled = stage04["adapter_status"] == "implemented"
+    if stage04_enabled and (node_path is None or ffprobe_path is None):
+        raise ValueError("implemented Stage 04 requires explicit absolute --node and --ffprobe paths")
     captured = {}
     config_again, errors, _, waves = load_and_validate_config(config_path, captured)
     if errors or config_again != config:
@@ -4377,6 +5186,8 @@ def run_productive_composition(config_path, *, python_path, model_path, voices_p
     stage02_paths = _productive_paths(root, stage02)
     stage03_paths = _productive_paths(root, stage03)
     outputs = {**stage01_paths, **stage02_paths, **stage03_paths}
+    stage04_paths = _productive_paths(root, stage04) if stage04_enabled else {}
+    outputs.update(stage04_paths)
     output_paths = list(outputs.values())
     if len({str(path).casefold() for path in output_paths}) != len(output_paths):
         raise ValueError("productive outputs collide")
@@ -4392,6 +5203,13 @@ def run_productive_composition(config_path, *, python_path, model_path, voices_p
 
     # Probe all trusted local runtimes/assets and capture the full DAG snapshot before publishing.
     blender_runtime = _preflight_blender_runtime(blender_path)
+    remotion_runtime_identity = None
+    if stage04_enabled:
+        worker_root, worker_path, package_path, lock_path = _remotion_worker_paths()
+        _verify_remotion_installation(worker_root)
+        remotion_runtime_identity = _preflight_remotion_runtime(
+            node_path, ffprobe_path, package_path, lock_path, worker_path,
+        )
     _hash_local_runtime_file(python_path, "Python interpreter", 512 * 1024 * 1024)
     _hash_local_runtime_file(model_path, "Kokoro model", 1024 * 1024 * 1024)
     _hash_local_runtime_file(voices_path, "Kokoro voices", 256 * 1024 * 1024)
@@ -4408,7 +5226,7 @@ def run_productive_composition(config_path, *, python_path, model_path, voices_p
         os.mkdir(run_dir, 0o700)
     except FileExistsError as exc:
         raise ValueError(f"manifest run directory already exists: {run_dir}") from exc
-    plan_owned, narration_owned, scene_owned = {}, {}, {}
+    plan_owned, narration_owned, scene_owned, remotion_owned = {}, {}, {}, {}
     manifest_identity = None
     active_stage = stage01["id"]
     worker_started = False
@@ -4598,9 +5416,31 @@ def run_productive_composition(config_path, *, python_path, model_path, voices_p
         unexpected_warnings = _unexpected_scene_warnings(config, config_path, final_warnings)
         if final_errors or unexpected_warnings:
             raise ValueError("final audiovisual manifest validation failed: " + "; ".join(final_errors + unexpected_warnings))
+        composition = None
+        if stage04_enabled:
+            active_stage = stage04["id"]
+            worker_started = True
+            composition = _run_remotion_stage04(
+                config, config_path, manifest, node_path=node_path, ffprobe_path=ffprobe_path,
+                input_hashes=input_hashes, input_snapshot=input_hashes, stage04_paths=stage04_paths,
+                output_owned=remotion_owned, preflight_identity=remotion_runtime_identity,
+            )
+            manifest["stages"][stage04["id"]] = composition["candidate"]
+            candidate_errors, candidate_warnings = validate_manifest(manifest, config, config_path, manifest_path)
+            unexpected_warnings = _unexpected_scene_warnings(config, config_path, candidate_warnings)
+            if candidate_errors or unexpected_warnings:
+                raise ValueError("Stage 04 candidate manifest validation failed: "
+                                 + "; ".join(candidate_errors + unexpected_warnings))
+            manifest_identity = _write_scene_checkpoint(manifest_path, manifest, manifest_identity)
+            final_errors, final_warnings = validate_manifest_file(config_path, manifest_path)
+            unexpected_warnings = _unexpected_scene_warnings(config, config_path, final_warnings)
+            if final_errors or unexpected_warnings:
+                raise ValueError("final audiovisual manifest validation failed: "
+                                 + "; ".join(final_errors + unexpected_warnings))
         return {"manifest_path": str(manifest_path), "run_id": run_id,
                 "stages": {key: value["status"] for key, value in manifest["stages"].items()},
-                "audio": published_audio, "provenance": provenance}
+                "audio": published_audio, "provenance": provenance,
+                "composition": composition["provenance"] if composition is not None else None}
     except (Exception, KeyboardInterrupt) as exc:
         reason = str(exc).strip() or type(exc).__name__
         changed_inputs = "project inputs changed" in reason or "pipeline config changed" in reason or "script changed" in reason
@@ -4608,7 +5448,7 @@ def run_productive_composition(config_path, *, python_path, model_path, voices_p
         narration_entry = manifest["stages"][stage03["id"]]
         scene_entry = manifest["stages"][stage02["id"]]
         if changed_inputs:
-            for owned in (plan_owned, narration_owned, scene_owned):
+            for owned in (plan_owned, narration_owned, scene_owned, remotion_owned):
                 for owned_path, identity in owned.items():
                     _remove_owned_file(owned_path, identity)
             for stage_id, entry in ((stage01["id"], validation_entry),
@@ -4647,6 +5487,20 @@ def run_productive_composition(config_path, *, python_path, model_path, voices_p
                 _remove_owned_file(owned_path, identity)
             narration_entry.update(status="failed", attempts=1, error=reason[:500], artifacts=[],
                                    stage_fingerprint=None, tool_versions={})
+        stage04_entry = manifest["stages"][stage04["id"]]
+        if stage04_entry["status"] == "pending" and stage04_enabled:
+            if active_stage == stage04["id"]:
+                for owned_path, identity in remotion_owned.items():
+                    _remove_owned_file(owned_path, identity)
+                stage04_entry.update(status="failed", attempts=1, error=reason[:500], artifacts=[],
+                                     stage_fingerprint=None, tool_versions={})
+            elif any(manifest["stages"][dependency]["status"] != "completed" for dependency in stage04["depends_on"]):
+                stage04_entry.update(status="blocked", error=f"Stage 04 dependency failed: {reason[:400]}")
+        elif stage04_entry["status"] == "completed":
+            for owned_path, identity in remotion_owned.items():
+                _remove_owned_file(owned_path, identity)
+            stage04_entry.update(status="failed", attempts=1, error=reason[:500], artifacts=[],
+                                 stage_fingerprint=None, tool_versions={})
         try:
             _write_scene_checkpoint(manifest_path, manifest, manifest_identity)
         except (OSError, ValueError) as persist_exc:
@@ -4701,6 +5555,8 @@ def main(argv=None):
     composition_parser.add_argument("--model", required=True, help="absolute path to the local Kokoro ONNX model")
     composition_parser.add_argument("--voices", required=True, help="absolute path to the local Kokoro voices file")
     composition_parser.add_argument("--blender", required=True, help="absolute path to the trusted Blender executable")
+    composition_parser.add_argument("--node", required=True, help="absolute path to the trusted Node.js runtime")
+    composition_parser.add_argument("--ffprobe", required=True, help="absolute path to the trusted ffprobe executable")
     args = parser.parse_args(argv)
 
     if args.command == "validate-manifest":
@@ -4772,6 +5628,7 @@ def main(argv=None):
             result = run_productive_composition(
                 args.config, python_path=args.python, model_path=args.model,
                 voices_path=args.voices, blender_path=args.blender,
+                node_path=args.node, ffprobe_path=args.ffprobe,
             )
         except (OSError, ValueError) as exc:
             print(json.dumps({"error": str(exc), "simulation": False}, ensure_ascii=False, sort_keys=True))
