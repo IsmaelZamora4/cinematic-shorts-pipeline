@@ -115,6 +115,11 @@ FINGERPRINT = re.compile(r"^[0-9a-f]{64}$")
 SLUG = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 EXECUTABLE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 
+
+class _ProductiveInputsChangedError(ValueError):
+    """Signal that a project input no longer matches the productive run snapshot."""
+
+
 _storyboard_spec = importlib.util.spec_from_file_location(
     "pipeline_storyboard_validator", Path(__file__).with_name("validate-storyboard.py")
 )
@@ -5365,11 +5370,19 @@ def run_productive_composition(config_path, *, python_path, model_path, voices_p
             raise ValueError("Kokoro WAV exceeds the 48,000-sample, two-second Blender composition limit")
         if stage04_enabled:
             storyboard_path = root.joinpath(*PurePosixPath(config["project"]["storyboard"]).parts)
-            storyboard, storyboard_bytes = _read_strict_bounded_json(
-                storyboard_path, MAX_PRODUCTIVE_STORYBOARD_BYTES, "current storyboard",
-            )
+            try:
+                storyboard, storyboard_bytes = _read_strict_bounded_json(
+                    storyboard_path, MAX_PRODUCTIVE_STORYBOARD_BYTES, "current storyboard",
+                )
+            except (OSError, ValueError) as read_error:
+                raise _ProductiveInputsChangedError(
+                    "project inputs changed or could not be verified before early Remotion timeline validation: "
+                    + str(read_error)
+                ) from read_error
             if hashlib.sha256(storyboard_bytes).hexdigest() != input_hashes.get("storyboard"):
-                raise ValueError("project storyboard changed before early Remotion timeline validation")
+                raise _ProductiveInputsChangedError(
+                    "project inputs changed before early Remotion timeline validation"
+                )
             _validate_remotion_timeline(
                 config, storyboard, published_wav, provenance,
                 run_id=run_id, project_id=config["project"]["id"],
@@ -5479,7 +5492,12 @@ def run_productive_composition(config_path, *, python_path, model_path, voices_p
                 "composition": composition["provenance"] if composition is not None else None}
     except (Exception, KeyboardInterrupt) as exc:
         reason = str(exc).strip() or type(exc).__name__
-        changed_inputs = "project inputs changed" in reason or "pipeline config changed" in reason or "script changed" in reason
+        changed_inputs = (
+            isinstance(exc, _ProductiveInputsChangedError)
+            or "project inputs changed" in reason
+            or "pipeline config changed" in reason
+            or "script changed" in reason
+        )
         validation_entry = manifest["stages"][stage01["id"]]
         narration_entry = manifest["stages"][stage03["id"]]
         scene_entry = manifest["stages"][stage02["id"]]
@@ -5491,8 +5509,13 @@ def run_productive_composition(config_path, *, python_path, model_path, voices_p
                                     (stage03["id"], narration_entry),
                                     (stage02["id"], scene_entry)):
                 if entry["status"] == "completed" or stage_id == active_stage or stage_id == stage01["id"]:
-                    entry.update(status="failed", attempts=1, error="project inputs changed during execution",
-                                 artifacts=[], stage_fingerprint=None, tool_versions={})
+                    if stage_id == stage02["id"] and not worker_started:
+                        entry.update(status="blocked", attempts=0,
+                                     error="project inputs changed before Blender execution", artifacts=[],
+                                     stage_fingerprint=None, tool_versions={})
+                    else:
+                        entry.update(status="failed", attempts=1, error="project inputs changed during execution",
+                                     artifacts=[], stage_fingerprint=None, tool_versions={})
                 elif entry["status"] == "pending" and active_stage == stage03["id"] and stage_id == stage02["id"]:
                     entry.update(status="blocked", error="03-tts-narration failed after project inputs changed")
         elif validation_entry["status"] == "pending":
