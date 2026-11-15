@@ -5363,6 +5363,18 @@ def run_productive_composition(config_path, *, python_path, model_path, voices_p
             raise ValueError(f"Kokoro outputs changed before Blender execution: {integrity_exc}") from integrity_exc
         if published_audio["frames"] > 48_000:
             raise ValueError("Kokoro WAV exceeds the 48,000-sample, two-second Blender composition limit")
+        if stage04_enabled:
+            storyboard_path = root.joinpath(*PurePosixPath(config["project"]["storyboard"]).parts)
+            storyboard, storyboard_bytes = _read_strict_bounded_json(
+                storyboard_path, MAX_PRODUCTIVE_STORYBOARD_BYTES, "current storyboard",
+            )
+            if hashlib.sha256(storyboard_bytes).hexdigest() != input_hashes.get("storyboard"):
+                raise ValueError("project storyboard changed before early Remotion timeline validation")
+            _validate_remotion_timeline(
+                config, storyboard, published_wav, provenance,
+                run_id=run_id, project_id=config["project"]["id"],
+                validated_plan_sha256=plan_hash,
+            )
         _assert_productive_config_unchanged(config, config_path)
         if _productive_snapshot(config, config_path)[0] != input_hashes:
             raise ValueError("project inputs changed before Blender execution")
