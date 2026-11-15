@@ -149,6 +149,121 @@ class ProductiveCompositionExecutionTests(unittest.TestCase):
                 voices_path=self.voices, blender_path=self.blender,
             )
 
+    def update_storyboard(self, update):
+        path = self.root / self.config["project"]["storyboard"]
+        storyboard = json.loads(path.read_text(encoding="utf-8"))
+        update(storyboard)
+        path.write_text(json.dumps(storyboard, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def run_remotion_combined(self):
+        runtime = {"path": str(self.blender.resolve()), "sha256": hashlib.sha256(self.blender.read_bytes()).hexdigest(),
+                   "version": (5, 2, 3), "version_string": "5.2.3"}
+        identity = self.remotion_runtime_identity()
+        node = self.root / ("node.exe" if os.name == "nt" else "node")
+        ffprobe = self.root / ("ffprobe.exe" if os.name == "nt" else "ffprobe")
+        node.write_bytes(b"synthetic Node")
+        ffprobe.write_bytes(b"synthetic ffprobe")
+        self.blender_calls = []
+        self.remotion_calls = []
+
+        def run_blender(*args):
+            self.blender_calls.append(args)
+            return self.fake_blender(*args)
+
+        def run_remotion(command, cwd, *, timeout_seconds, max_output_bytes=0):
+            self.remotion_calls.append(command)
+            return self.mock_remotion_process(
+                command, cwd, timeout_seconds=timeout_seconds, max_output_bytes=max_output_bytes,
+            )
+
+        with mock.patch.object(pipeline, "_preflight_blender_runtime", return_value=runtime), \
+             mock.patch.object(pipeline, "_verify_remotion_installation"), \
+             mock.patch.object(pipeline, "_preflight_remotion_runtime", return_value=identity), \
+             mock.patch.object(pipeline, "_productive_worker", side_effect=self.fake_kokoro), \
+             mock.patch.object(pipeline, "_run_blender_scenes_worker", side_effect=run_blender), \
+             mock.patch.object(pipeline, "_run_remotion_process", side_effect=run_remotion):
+            return pipeline.run_productive_composition(
+                self.config_path, python_path=self.python, model_path=self.model,
+                voices_path=self.voices, blender_path=self.blender, node_path=node, ffprobe_path=ffprobe,
+            )
+
+    def assert_early_timeline_failure(self, error_pattern):
+        with self.assertRaisesRegex(ValueError, error_pattern):
+            self.run_remotion_combined()
+        self.assertEqual([], self.blender_calls)
+        self.assertEqual([], self.remotion_calls)
+        manifest_path = next(self.root.glob(".pipeline/runs/run-*/manifest.json"))
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        stages = manifest["stages"]
+        self.assertEqual("completed", stages["01-validate-project"]["status"])
+        self.assertEqual("completed", stages["03-tts-narration"]["status"])
+        self.assertEqual("blocked", stages["02-blender-scenes"]["status"])
+        self.assertEqual(0, stages["02-blender-scenes"]["attempts"])
+        self.assertEqual([], stages["02-blender-scenes"]["artifacts"])
+        self.assertEqual("blocked", stages["04-remotion-compose"]["status"])
+        self.assertEqual("pending", stages["05-ffmpeg-finalize"]["status"])
+        self.assertEqual("pending", stages["06-quality-control"]["status"])
+        wav_path = self.root / ".pipeline/work/narration.wav"
+        self.assertEqual(self.wav_bytes, wav_path.read_bytes())
+        errors, _ = pipeline.validate_manifest_file(self.config_path, manifest_path)
+        self.assertEqual([], errors)
+
+    def run_with_storyboard_guard_hook(self, hook):
+        self.configure_remotion()
+        original_reader = pipeline._read_strict_bounded_json
+        guard_reads = []
+
+        def read_storyboard(path, maximum_size, label):
+            if label == "current storyboard":
+                manifest_path = next(self.root.glob(".pipeline/runs/run-*/manifest.json"))
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                self.assertEqual("completed", manifest["stages"]["03-tts-narration"]["status"])
+                guard_reads.append(Path(path))
+                hook(Path(path))
+            return original_reader(path, maximum_size, label)
+
+        with mock.patch.object(pipeline, "_read_strict_bounded_json", side_effect=read_storyboard):
+            with self.assertRaises((OSError, ValueError)) as caught:
+                self.run_remotion_combined()
+        self.assertEqual(1, len(guard_reads))
+        self.assertEqual([], self.blender_calls)
+        self.assertEqual([], self.remotion_calls)
+        manifest_path = next(self.root.glob(".pipeline/runs/run-*/manifest.json"))
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return caught.exception, guard_reads[0], manifest_path, manifest
+
+    def assert_storyboard_input_invalidation(self, hook, *, restore_storyboard=False):
+        storyboard_path = self.root / self.config["project"]["storyboard"]
+        original_storyboard = storyboard_path.read_bytes()
+        unowned = self.root / "unowned-external-output.bin"
+        unowned.write_bytes(b"must remain untouched")
+        error, storyboard_path, manifest_path, manifest = self.run_with_storyboard_guard_hook(hook)
+        self.assertEqual("failed", manifest["stages"]["01-validate-project"]["status"])
+        self.assertEqual("failed", manifest["stages"]["03-tts-narration"]["status"])
+        self.assertEqual("blocked", manifest["stages"]["02-blender-scenes"]["status"])
+        self.assertEqual(0, manifest["stages"]["02-blender-scenes"]["attempts"])
+        self.assertEqual([], manifest["stages"]["02-blender-scenes"]["artifacts"])
+        self.assertIsNone(manifest["stages"]["01-validate-project"]["stage_fingerprint"])
+        self.assertIsNone(manifest["stages"]["03-tts-narration"]["stage_fingerprint"])
+        self.assertEqual([], manifest["stages"]["01-validate-project"]["artifacts"])
+        self.assertEqual([], manifest["stages"]["03-tts-narration"]["artifacts"])
+        self.assertEqual("blocked", manifest["stages"]["04-remotion-compose"]["status"])
+        self.assertEqual("pending", manifest["stages"]["05-ffmpeg-finalize"]["status"])
+        self.assertEqual("pending", manifest["stages"]["06-quality-control"]["status"])
+        self.assertFalse((self.root / ".pipeline/work/validated-plan.json").exists())
+        self.assertFalse((self.root / ".pipeline/work/narration.wav").exists())
+        self.assertFalse((self.root / ".pipeline/work/narration-provenance.json").exists())
+        self.assertFalse((self.root / ".pipeline/work/scenes.zip").exists())
+        self.assertFalse((self.root / ".pipeline/work/composite.mp4").exists())
+        self.assertEqual(b"must remain untouched", unowned.read_bytes())
+        if restore_storyboard:
+            input_errors, _ = pipeline.validate_manifest_file(self.config_path, manifest_path)
+            self.assertTrue(input_errors)
+            storyboard_path.write_bytes(original_storyboard)
+        errors, _ = pipeline.validate_manifest_file(self.config_path, manifest_path)
+        self.assertEqual([], errors, f"{error}: {errors}")
+        return error, manifest_path
+
     def test_audio_over_two_seconds_stops_before_blender_and_keeps_completed_audio(self):
         self.wav_bytes = make_wav(samples=[1200] * 48_001)
         blender_calls = []
@@ -360,6 +475,126 @@ class ProductiveCompositionExecutionTests(unittest.TestCase):
         self.assertEqual(24, result["composition"]["ffprobe"]["video"]["frames"])
         self.assertTrue((self.root / ".pipeline/work/composite.mp4").is_file())
         self.assertTrue((self.root / ".pipeline/work/composition-provenance.json").is_file())
+
+    def test_exact_recorded_duration_passes_early_guard_and_stage_04_context(self):
+        self.configure_remotion()
+        result = self.run_remotion_combined()
+        self.assertEqual(1, len(self.blender_calls))
+        self.assertEqual(2, len(self.remotion_calls))
+        manifest = json.loads(Path(result["manifest_path"]).read_text(encoding="utf-8"))
+        self.assertEqual("completed", manifest["stages"]["02-blender-scenes"]["status"])
+        self.assertEqual("completed", manifest["stages"]["04-remotion-compose"]["status"])
+        self.assertEqual([], pipeline.validate_manifest_file(self.config_path, result["manifest_path"])[0])
+
+    def test_one_extra_pcm_sample_within_limit_and_stale_duration_stops_before_blender(self):
+        self.configure_remotion()
+        self.wav_bytes = make_wav(samples=[1200] * 43_201)
+        self.assert_early_timeline_failure("duration_ms")
+
+    def test_wav_shorter_than_declared_duration_stops_before_blender(self):
+        self.configure_remotion()
+        self.update_storyboard(lambda storyboard: storyboard["voiceover"].update(duration_ms=1801))
+        self.assert_early_timeline_failure("duration_ms")
+
+    def test_wav_over_48000_samples_still_stops_before_blender_with_remotion_enabled(self):
+        self.configure_remotion()
+        self.wav_bytes = make_wav(samples=[1200] * 48_001)
+        self.assert_early_timeline_failure("48,000-sample")
+
+    def test_caption_quantization_collision_stops_before_blender(self):
+        self.configure_remotion()
+        self.update_storyboard(lambda storyboard: storyboard.update(captions=[
+            {"text": "A", "start_ms": 1, "end_ms": 70},
+            {"text": "B", "start_ms": 70, "end_ms": 140},
+        ]))
+        self.assert_early_timeline_failure("quantization collision")
+
+    def test_storyboard_whitespace_change_after_stage_03_invalidates_checkpoints(self):
+        def append_valid_whitespace(path):
+            path.write_bytes(path.read_bytes() + b" ")
+
+        error, _ = self.assert_storyboard_input_invalidation(append_valid_whitespace)
+        self.assertIn("project inputs changed", str(error))
+
+    def test_storyboard_semantic_replacement_after_stage_03_invalidates_checkpoints(self):
+        def replace_with_changed_anchor(path):
+            storyboard = json.loads(path.read_text(encoding="utf-8"))
+            storyboard["narrative_timing"]["anchors"][0]["start_ms"] = 1
+            replacement = path.with_name(path.name + ".replacement")
+            replacement.write_text(json.dumps(storyboard, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(replacement, path)
+
+        self.assert_storyboard_input_invalidation(replace_with_changed_anchor)
+
+    def test_invalid_storyboard_json_after_stage_03_invalidates_checkpoints(self):
+        def corrupt_json(path):
+            path.write_bytes(b'{"broken":')
+
+        error, manifest_path = self.assert_storyboard_input_invalidation(
+            corrupt_json, restore_storyboard=True,
+        )
+        self.assertIn("JSON", str(error))
+        self.assertEqual([], pipeline.validate_manifest_file(self.config_path, manifest_path)[0])
+
+    def test_deleted_storyboard_after_stage_03_invalidates_checkpoints(self):
+        def delete_storyboard(path):
+            path.unlink()
+
+        error, manifest_path = self.assert_storyboard_input_invalidation(
+            delete_storyboard, restore_storyboard=True,
+        )
+        self.assertIn("current storyboard", str(error))
+        self.assertEqual([], pipeline.validate_manifest_file(self.config_path, manifest_path)[0])
+
+    def test_unreadable_storyboard_after_stage_03_invalidates_checkpoints(self):
+        def deny_read(_path):
+            raise PermissionError("synthetic storyboard read denial")
+
+        error, _ = self.assert_storyboard_input_invalidation(deny_read)
+        self.assertIn("synthetic storyboard read denial", str(error))
+
+    def test_oversized_storyboard_after_stage_03_invalidates_checkpoints(self):
+        def oversize_storyboard(path):
+            original = path.read_bytes()
+            padding_size = pipeline.MAX_PRODUCTIVE_STORYBOARD_BYTES + 1 - len(original)
+            path.write_bytes(original + b" " * padding_size)
+
+        error, manifest_path = self.assert_storyboard_input_invalidation(oversize_storyboard)
+        self.assertIn("maximum size", str(error))
+        self.assertEqual([], pipeline.validate_manifest_file(self.config_path, manifest_path)[0])
+
+    def test_storyboard_change_during_bounded_read_invalidates_checkpoints(self):
+        def change_during_read(_path):
+            raise ValueError("storyboard identity changed during bounded read")
+
+        error, _ = self.assert_storyboard_input_invalidation(change_during_read)
+        self.assertIn("identity changed", str(error))
+
+    def test_invalid_recorded_anchor_stops_before_blender(self):
+        self.configure_remotion()
+
+        def make_anchor_estimated(storyboard):
+            storyboard["narrative_timing"]["anchors"][0]["basis"] = "estimated"
+
+        self.update_storyboard(make_anchor_estimated)
+        with self.assertRaisesRegex(ValueError, "basis must be measured or manually_reviewed"):
+            self.run_remotion_combined()
+        self.assertEqual([], self.blender_calls)
+        self.assertEqual([], self.remotion_calls)
+
+    def test_no_captions_or_anchors_remains_valid_for_the_combined_run(self):
+        self.configure_remotion()
+
+        def remove_timing(storyboard):
+            storyboard["captions"] = []
+            storyboard.pop("narrative_timing", None)
+
+        self.update_storyboard(remove_timing)
+        result = self.run_remotion_combined()
+        manifest = json.loads(Path(result["manifest_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(1, len(self.blender_calls))
+        self.assertEqual("completed", manifest["stages"]["04-remotion-compose"]["status"])
+        self.assertEqual([], pipeline.validate_manifest_file(self.config_path, result["manifest_path"])[0])
 
     def test_remotion_worker_failure_records_failed_stage_without_publication(self):
         self.configure_remotion()
